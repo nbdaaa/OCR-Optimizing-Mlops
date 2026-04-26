@@ -1,0 +1,22 @@
+# core
+huggingface-hub>=0.23
+datasets>=2.19
+fastapi>=0.111
+uvicorn>=0.30
+requests>=2.32
+prometheus-client>=0.20
+pydantic>=2.7
+python-dotenv>=1.0
+prefect>=2.19
+Pillow>=10.3
+imagehash>=4.3
+
+# training
+torch>=2.3
+transformers>=4.41
+accelerate>=0.30
+wandb>=0.17
+
+# dev
+pytest>=8
+pytest-asyncio>=0.23
