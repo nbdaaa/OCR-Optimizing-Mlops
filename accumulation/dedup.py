@@ -1,16 +1,14 @@
 import os
-import json
-import tempfile
-from pathlib import Path
-from PIL import Image
+import threading
 import imagehash
+from PIL import Image
 from common.storage import download_json, upload_json
 from common.logging import get_logger
 
-log = get_logger(__name__)
-
+log        = get_logger(__name__)
 _HASH_FILE = "hash_index.json"
-_THRESHOLD = 8   # hamming distance — lower = stricter dedup
+_THRESHOLD = 8
+_lock      = threading.Lock()   # ← prevent concurrent read/write
 
 
 def _load_seen_hashes() -> dict:
@@ -24,12 +22,34 @@ def _save_seen_hashes(hashes: dict) -> None:
     upload_json(hashes, _HASH_FILE)
 
 
+def is_duplicate(image_path: str) -> bool:
+    """
+    Thread-safe duplicate check.
+    Reads hash index, checks for near-duplicate, registers if unique.
+    """
+    with _lock:   # ← only one thread checks/writes at a time
+        try:
+            img  = Image.open(image_path).convert("RGB")
+            h    = str(imagehash.phash(img))
+            seen = _load_seen_hashes()
+
+            for existing_hash in seen.values():
+                if imagehash.hex_to_hash(h) - imagehash.hex_to_hash(existing_hash) < _THRESHOLD:
+                    return True   # duplicate
+
+            # not a duplicate — register it
+            seen[image_path] = h
+            _save_seen_hashes(seen)
+            return False
+
+        except Exception as e:
+            log.info(f"Dedup check failed for {image_path}: {e} — allowing")
+            return False
+
+
 def filter_duplicates(samples: list[dict]) -> list[dict]:
-    """
-    samples: list of dicts with at least {"image_path": str, ...}
-    Returns only unique samples. Updates hash index in HF.
-    """
-    seen = _load_seen_hashes()
+    """Batch dedup for dataset_builder — runs single-threaded."""
+    seen   = _load_seen_hashes()
     unique = []
 
     for sample in samples:
@@ -46,7 +66,7 @@ def filter_duplicates(samples: list[dict]) -> list[dict]:
             else:
                 log.info(f"Duplicate skipped: {sample['image_path']}")
         except Exception as e:
-            log.info(f"Could not hash {sample['image_path']}: {e} — keeping sample")
+            log.info(f"Could not hash {sample['image_path']}: {e} — keeping")
             unique.append(sample)
 
     _save_seen_hashes(seen)

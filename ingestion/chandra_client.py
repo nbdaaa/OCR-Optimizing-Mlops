@@ -43,6 +43,6 @@ def call_chandra(image_path: str) -> str:
         batch   = [BatchInputItem(image=image, prompt_type="ocr_layout")]
         result  = manager.generate(batch)[0]
         log.info(f"Chandra returned output for {image_path}")
-        return result.html
+        return result.raw
     except Exception as e:
         raise ChandraBaseError(f"Chandra inference failed: {e}") from e

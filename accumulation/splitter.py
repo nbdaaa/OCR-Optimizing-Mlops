@@ -6,9 +6,9 @@ log = get_logger(__name__)
 
 
 def split_and_push(dataset: Dataset) -> DatasetDict:
-    # first split off 20% for val+test
+
     split_1    = dataset.train_test_split(test_size=0.2, seed=42)
-    # split that 20% evenly into val and test (10% each of total)
+
     split_2    = split_1["test"].train_test_split(test_size=0.5, seed=42)
 
     dataset_dict = DatasetDict({
