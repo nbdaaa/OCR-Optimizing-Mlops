@@ -1,12 +1,15 @@
-import os
 import time
 import signal
 import shutil
+from collections import Counter
 from pathlib import Path
 from dotenv import load_dotenv
 from common.logging import get_logger
-from common.storage import get_local_sample_count, push_to_hf, clear_local_repo, LOCAL_REPO, _ensure_repo
-from ingestion.ingest import ingest_file
+from common.storage import (
+    get_local_sample_count, push_to_hf, clear_local_repo, LOCAL_REPO, _ensure_repo,
+)
+from ingestion.pdf_splitter import pdf_to_images
+from ingestion.ingest import process_image_batch, BATCH_SIZE
 
 load_dotenv()
 log = get_logger(__name__)
@@ -19,10 +22,12 @@ POLL_INTERVAL = 5
 COMMIT_EVERY  = 1000
 
 _running       = True
-_shutdown_once = False   # ← prevent multiple shutdowns
+_shutdown_once = False
+_image_queue: list[tuple[str, Path]] = []  # (img_path, source_file)
+_source_remaining: dict[Path, int]   = {}  # source_file → images not yet processed
 
 
-def setup_dirs():
+def setup_dirs() -> None:
     WATCH_DIR.mkdir(exist_ok=True)
     DONE_DIR.mkdir(exist_ok=True)
     FAILED_DIR.mkdir(exist_ok=True)
@@ -35,7 +40,15 @@ def scan_once() -> list[Path]:
     ]
 
 
-def _try_push():
+def _move(src: Path, dest_dir: Path) -> None:
+    dest = dest_dir / src.name
+    if dest.exists():
+        dest = dest_dir / f"{src.stem}_{int(time.time())}{src.suffix}"
+    shutil.move(str(src), dest)
+    print(f"   → {dest_dir.name}/{dest.name}")
+
+
+def _try_push() -> None:
     count = get_local_sample_count()
     if count >= COMMIT_EVERY:
         print(f"\n🚀 {count} samples in local repo — pushing to HF...")
@@ -44,16 +57,33 @@ def _try_push():
         print(f"✅ Pushed {pushed} samples to HF. Local repo cleared.\n")
 
 
-def _shutdown(signum, frame):
-    global _running, _shutdown_once
+def _fire_batch(batch: list[tuple[str, Path]]) -> None:
+    global _source_remaining
 
+    image_paths = [img for img, _ in batch]
+    sources     = [src for _, src in batch]
+
+    print(f"\n🚀 Firing batch of {len(batch)} image(s)...")
+    succeeded = process_image_batch(image_paths)
+    print(f"   Batch done — {succeeded}/{len(batch)} saved | local total: {get_local_sample_count()}")
+
+    # Decrement remaining count; move source file to done/ when all images processed
+    for src, dispatched in Counter(sources).items():
+        _source_remaining[src] -= dispatched
+        if _source_remaining[src] <= 0:
+            del _source_remaining[src]
+            _move(src, DONE_DIR)
+
+    _try_push()
+
+
+def _shutdown(signum, frame) -> None:
+    global _running, _shutdown_once
     if _shutdown_once:
         print("\n   Already shutting down — please wait...")
         return
-
     _shutdown_once = True
     _running       = False
-
     print("\n\n🛑 Shutdown signal received — finishing current batch first...")
     print("   (press Ctrl+C again ONLY if completely stuck)\n")
 
@@ -62,8 +92,7 @@ signal.signal(signal.SIGINT,  _shutdown)
 signal.signal(signal.SIGTERM, _shutdown)
 
 
-def _final_push():
-    """Push remaining samples to HF. Called after main loop exits."""
+def _final_push() -> None:
     count = get_local_sample_count()
     if count == 0:
         print("   No remaining samples to push.")
@@ -79,61 +108,57 @@ def _final_push():
         print(f"       cd data/repo && git add . && git commit -m 'manual push' && git push")
 
 
-def main():
+def main() -> None:
+    global _image_queue
+
     setup_dirs()
 
-    # ensure repo is cloned before any processing starts
-    from common.storage import _ensure_repo
     print("🔄 Initializing local repo...")
     _ensure_repo()
-    print(f"✅ Local repo ready at {(LOCAL_REPO).resolve()}\n")
+    print(f"✅ Local repo ready at {LOCAL_REPO.resolve()}\n")
 
     print(f"👀 Watcher started — drop PDF/images into {WATCH_DIR.resolve()}")
+    print(f"   Batch size      : {BATCH_SIZE} images")
     print(f"   HF push every   : {COMMIT_EVERY} samples")
     print(f"   Poll interval   : {POLL_INTERVAL}s")
     print(f"   Local repo      : ./data/repo/")
     print(f"   Ctrl+C once to stop gracefully\n")
 
     while _running:
-        files = scan_once()
+        for file_path in scan_once():
+            if file_path in _source_remaining:
+                continue  # already split and queued
 
-        for file_path in files:
-            if not _running:
-                break
-
-            print(f"\n📄 Processing: {file_path.name}")
+            print(f"\n📄 Splitting: {file_path.name}")
             try:
-                pages_saved = ingest_file(str(file_path))
-                count       = get_local_sample_count()
-
-                print(f"   Pages saved     : {pages_saved}")
-                print(f"   Local samples   : {count} / {COMMIT_EVERY}")
-
-                _try_push()
-
-                dest = DONE_DIR / file_path.name
-                if dest.exists():
-                    dest = DONE_DIR / f"{file_path.stem}_{int(time.time())}{file_path.suffix}"
-                shutil.move(str(file_path), dest)
-                print(f"✅ Moved → {dest.name}")
-
+                imgs = (
+                    pdf_to_images(str(file_path))
+                    if file_path.suffix.lower() == ".pdf"
+                    else [str(file_path)]
+                )
+                _source_remaining[file_path] = len(imgs)
+                _image_queue.extend((img, file_path) for img in imgs)
+                print(f"   {len(imgs)} image(s) queued — total pending: {len(_image_queue)}")
             except Exception as e:
-                log.info(f"❌ Failed {file_path.name}: {e}")
-                print(f"❌ Failed: {file_path.name} — {e}")
-                dest = FAILED_DIR / file_path.name
-                if dest.exists():
-                    dest = FAILED_DIR / f"{file_path.stem}_{int(time.time())}{file_path.suffix}"
-                shutil.move(str(file_path), dest)
+                log.info(f"❌ Split failed {file_path.name}: {e}")
+                print(f"❌ Split failed: {file_path.name} — {e}")
+                _move(file_path, FAILED_DIR)
 
-        if not _running:
-            break
+        # Fire complete batches
+        while len(_image_queue) >= BATCH_SIZE:
+            batch        = _image_queue[:BATCH_SIZE]
+            _image_queue = _image_queue[BATCH_SIZE:]
+            _fire_batch(batch)
 
         time.sleep(POLL_INTERVAL)
 
     # ── graceful shutdown ─────────────────────────────────────────────────────
-    print("\n🛑 Main loop exited. Waiting for in-flight requests to finish...")
-    # give threads 10s to finish current batch
-    time.sleep(10)
+    print("\n🛑 Main loop exited. Finishing in-progress work...")
+
+    if _image_queue:
+        print(f"   Flushing {len(_image_queue)} remaining image(s)...")
+        _fire_batch(_image_queue)
+        _image_queue = []
 
     _final_push()
     print("\n👋 Watcher stopped.")

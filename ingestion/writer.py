@@ -1,7 +1,6 @@
 import uuid
 from PIL import Image
 from common.storage import upload_image, upload_json, upload_raw_html, write_local_count
-from accumulation.counter import increment
 from accumulation.dedup import is_duplicate
 from common.logging import get_logger
 from ingestion.converter import chandra_to_docling

@@ -1,6 +1,4 @@
-import sys
 import argparse
-import asyncio
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
@@ -8,12 +6,12 @@ from common.logging import get_logger
 from ingestion.pdf_splitter import pdf_to_images
 from ingestion.chandra_client import call_chandra
 from ingestion.writer import save_sample
-from accumulation.counter import increment
+
 load_dotenv()
 log = get_logger(__name__)
 
-SUPPORTED      = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
-BATCH_SIZE     = 50   # số requests gửi song song cùng lúc
+SUPPORTED  = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
+BATCH_SIZE = 100
 
 
 def process_one(img_path: str, idx: int, total: int) -> bool:
@@ -31,7 +29,25 @@ def process_one(img_path: str, idx: int, total: int) -> bool:
         return False
 
 
-def ingest_file(file_path: str, batch_size: int = BATCH_SIZE) -> None:
+def process_image_batch(image_paths: list[str], offset: int = 0, total: int = 0) -> int:
+    """
+    Fire all image_paths concurrently and wait for every request to finish.
+    Returns the number of successfully saved samples.
+    """
+    n     = len(image_paths)
+    total = total or n
+
+    with ThreadPoolExecutor(max_workers=n) as executor:
+        futures = {
+            executor.submit(process_one, img, offset + i + 1, total): img
+            for i, img in enumerate(image_paths)
+        }
+        succeeded = sum(1 for f in as_completed(futures) if f.result())
+
+    return succeeded
+
+
+def ingest_file(file_path: str, batch_size: int = BATCH_SIZE) -> int:
     path = Path(file_path)
 
     if not path.exists():
@@ -53,30 +69,10 @@ def ingest_file(file_path: str, batch_size: int = BATCH_SIZE) -> None:
 
         print(f"\n🚀 Firing batch [{batch_start+1}–{batch_end}] / {total} ({len(batch)} requests)...")
 
-        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            futures = {
-                executor.submit(
-                    process_one,
-                    img_path,
-                    batch_start + i + 1,
-                    total,
-                ): img_path
-                for i, img_path in enumerate(batch)
-            }
+        batch_saved = process_image_batch(batch, offset=batch_start, total=total)
+        succeeded  += batch_saved
 
-            batch_saved = sum(
-                1 for f in as_completed(futures)
-                if f.result() is True
-            )
-
-        succeeded += batch_saved
-
-        # ── single atomic increment for the whole batch ──────────────────
-        if batch_saved > 0:
-            new_count = increment(batch_saved)
-            print(f"   ✅ Batch done — saved {batch_saved}/{len(batch)} | total samples: {new_count}")
-        else:
-            print(f"   ✅ Batch done — 0 saved (all duplicates or failed)")
+        print(f"   Batch done — saved {batch_saved}/{len(batch)}")
 
     print(f"\n🎉 Done. {succeeded}/{total} page(s) saved from {path.name}")
     return succeeded
