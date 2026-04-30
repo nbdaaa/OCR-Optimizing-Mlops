@@ -14,17 +14,29 @@ from ingestion.ingest import process_image_batch, BATCH_SIZE
 load_dotenv()
 log = get_logger(__name__)
 
-WATCH_DIR     = Path("./data")
-DONE_DIR      = Path("./data/done")
-FAILED_DIR    = Path("./data/failed")
-SUPPORTED     = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
-POLL_INTERVAL = 5
-COMMIT_EVERY  = 1000
+WATCH_DIR         = Path("./data")
+DONE_DIR          = Path("./data/done")
+FAILED_DIR        = Path("./data/failed")
+SUPPORTED         = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
+POLL_INTERVAL     = 5
+COMMIT_EVERY      = 1000
+# How many split images to keep ready on disk at once.
+# At ~2 MB/page this caps temp-file usage to ~600 MB.
+MAX_QUEUED_IMAGES = BATCH_SIZE * 3
 
 _running       = True
 _shutdown_once = False
-_image_queue: list[tuple[str, Path]] = []  # (img_path, source_file)
-_source_remaining: dict[Path, int]   = {}  # source_file → images not yet processed
+
+# Files discovered but not yet split (just Path objects, no disk writes).
+_file_queue: list[Path] = []
+
+# Split images ready to fire: (tmp_img_path, source_file).
+_image_queue: list[tuple[str, Path]] = []
+
+# source_file → total images from that file (queued + already fired).
+_source_total:     dict[Path, int] = {}
+# source_file → images not yet dispatched to a batch.
+_source_remaining: dict[Path, int] = {}
 
 
 def setup_dirs() -> None:
@@ -57,6 +69,43 @@ def _try_push() -> None:
         print(f"✅ Pushed {pushed} samples to HF. Local repo cleared.\n")
 
 
+def _fill_image_queue() -> None:
+    """
+    Lazily split files from _file_queue into temp PNGs until the image queue
+    reaches MAX_QUEUED_IMAGES or we run out of files.
+    This keeps temp-file disk usage bounded regardless of how many source
+    files are waiting.
+    """
+    while _file_queue and len(_image_queue) < MAX_QUEUED_IMAGES:
+        file_path = _file_queue.pop(0)
+        print(f"\n📄 Splitting: {file_path.name}")
+        try:
+            imgs = (
+                pdf_to_images(str(file_path))
+                if file_path.suffix.lower() == ".pdf"
+                else [str(file_path)]
+            )
+            _source_total[file_path]     = len(imgs)
+            _source_remaining[file_path] = len(imgs)
+            _image_queue.extend((img, file_path) for img in imgs)
+            print(f"   {len(imgs)} image(s) queued — image queue: {len(_image_queue)} | files waiting: {len(_file_queue)}")
+        except Exception as e:
+            log.info(f"❌ Split failed {file_path.name}: {e}")
+            print(f"❌ Split failed: {file_path.name} — {e}")
+            _move(file_path, FAILED_DIR)
+
+
+def _cleanup_temps(image_paths: list[str]) -> None:
+    """Delete temp PNG files created by pdf_to_images after they've been processed."""
+    for p in image_paths:
+        path = Path(p)
+        if path.parent == Path("/tmp") or str(path).startswith("/tmp/"):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 def _fire_batch(batch: list[tuple[str, Path]]) -> None:
     global _source_remaining
 
@@ -67,11 +116,14 @@ def _fire_batch(batch: list[tuple[str, Path]]) -> None:
     succeeded = process_image_batch(image_paths)
     print(f"   Batch done — {succeeded}/{len(batch)} saved | local total: {get_local_sample_count()}")
 
+    _cleanup_temps(image_paths)
+
     # Decrement remaining count; move source file to done/ when all images processed
     for src, dispatched in Counter(sources).items():
         _source_remaining[src] -= dispatched
         if _source_remaining[src] <= 0:
             del _source_remaining[src]
+            del _source_total[src]
             _move(src, DONE_DIR)
 
     _try_push()
@@ -109,7 +161,7 @@ def _final_push() -> None:
 
 
 def main() -> None:
-    global _image_queue
+    global _image_queue, _file_queue
 
     setup_dirs()
 
@@ -118,47 +170,44 @@ def main() -> None:
     print(f"✅ Local repo ready at {LOCAL_REPO.resolve()}\n")
 
     print(f"👀 Watcher started — drop PDF/images into {WATCH_DIR.resolve()}")
-    print(f"   Batch size      : {BATCH_SIZE} images")
-    print(f"   HF push every   : {COMMIT_EVERY} samples")
-    print(f"   Poll interval   : {POLL_INTERVAL}s")
-    print(f"   Local repo      : ./data/repo/")
+    print(f"   Batch size        : {BATCH_SIZE} images")
+    print(f"   Max queued images : {MAX_QUEUED_IMAGES} (~{MAX_QUEUED_IMAGES * 2} MB temp disk)")
+    print(f"   HF push every     : {COMMIT_EVERY} samples")
+    print(f"   Poll interval     : {POLL_INTERVAL}s")
+    print(f"   Local repo        : ./data/repo/")
     print(f"   Ctrl+C once to stop gracefully\n")
 
     while _running:
+        # Enqueue newly discovered files (no disk write yet)
+        known = set(_source_remaining) | set(_source_total) | set(_file_queue)
         for file_path in scan_once():
-            if file_path in _source_remaining:
-                continue  # already split and queued
+            if file_path not in known:
+                _file_queue.append(file_path)
+                known.add(file_path)
+                print(f"   📥 Queued for splitting: {file_path.name} ({len(_file_queue)} files waiting)")
 
-            print(f"\n📄 Splitting: {file_path.name}")
-            try:
-                imgs = (
-                    pdf_to_images(str(file_path))
-                    if file_path.suffix.lower() == ".pdf"
-                    else [str(file_path)]
-                )
-                _source_remaining[file_path] = len(imgs)
-                _image_queue.extend((img, file_path) for img in imgs)
-                print(f"   {len(imgs)} image(s) queued — total pending: {len(_image_queue)}")
-            except Exception as e:
-                log.info(f"❌ Split failed {file_path.name}: {e}")
-                print(f"❌ Split failed: {file_path.name} — {e}")
-                _move(file_path, FAILED_DIR)
+        # Lazily split files until image queue is full enough
+        _fill_image_queue()
 
-        # Fire complete batches
+        # Fire complete batches; after each batch refill from file queue
         while len(_image_queue) >= BATCH_SIZE:
             batch        = _image_queue[:BATCH_SIZE]
             _image_queue = _image_queue[BATCH_SIZE:]
             _fire_batch(batch)
+            _fill_image_queue()  # top up image queue after batch consumed it
 
         time.sleep(POLL_INTERVAL)
 
     # ── graceful shutdown ─────────────────────────────────────────────────────
     print("\n🛑 Main loop exited. Finishing in-progress work...")
 
-    if _image_queue:
-        print(f"   Flushing {len(_image_queue)} remaining image(s)...")
-        _fire_batch(_image_queue)
-        _image_queue = []
+    # Split and process any remaining files/images
+    _fill_image_queue()
+    while _image_queue:
+        batch        = _image_queue[:BATCH_SIZE]
+        _image_queue = _image_queue[BATCH_SIZE:]
+        _fire_batch(batch)
+        _fill_image_queue()
 
     _final_push()
     print("\n👋 Watcher stopped.")
