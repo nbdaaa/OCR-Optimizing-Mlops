@@ -1,36 +1,29 @@
 import os
 import threading
 from dotenv import load_dotenv
-from common.storage import download_json, upload_json
+from common.storage import get_local_sample_count
 from common.logging import get_logger
 
 load_dotenv()
 log        = get_logger(__name__)
 _lock      = threading.Lock()
-_COUNT_FILE = "count.json"
-_THRESHOLD  = int(os.environ.get("ACCUMULATION_THRESHOLD", 5000))
+_THRESHOLD = int(os.environ.get("ACCUMULATION_THRESHOLD", 5000))
 
 
 def get_count() -> int:
-    try:
-        return int(download_json(_COUNT_FILE).get("count", 0))
-    except Exception:
-        return 0
+    """Real count based on files in ./data/repo/chandra_raw/"""
+    return get_local_sample_count()
 
 
 def increment(n: int = 1) -> int:
-    with _lock:   # chỉ 1 thread được đọc-ghi count tại 1 thời điểm
-        count = get_count() + n
-        upload_json({"count": count}, _COUNT_FILE)
-        log.info(f"Sample count → {count}")
-        return count
-
-
-def reset() -> None:
-    with _lock:
-        upload_json({"count": 0}, _COUNT_FILE)
-        log.info("Sample count reset to 0")
+    """No-op — count is derived from real files, not a counter."""
+    return get_count()
 
 
 def is_ready() -> bool:
     return get_count() >= _THRESHOLD
+
+
+def reset() -> None:
+    """Reset is handled by clear_local_repo() after push."""
+    log.info("Counter reset — handled by clear_local_repo()")

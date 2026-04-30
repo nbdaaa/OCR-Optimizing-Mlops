@@ -61,6 +61,15 @@ def chandra_to_docling(chandra_html: str, img_w: int, img_h: int) -> str:
             content   = str(table_tag) if table_tag else _clean(div)
             lines.append(f"<table>{loc}{content}</table>")
 
+        elif label == "Image":
+            img_tag = div.find("img")
+            if img_tag:
+                alt_text = img_tag.get("alt", "").strip()
+                if alt_text:
+                    lines.append(f"<picture>{loc}{alt_text}</picture>")
+                else:
+                    lines.append(f"<picture>{loc}</picture>")
+
         elif label == "List-Group":
             list_el = div.find("ul") or div.find("ol")
             if list_el:

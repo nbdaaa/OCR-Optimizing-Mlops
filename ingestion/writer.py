@@ -1,24 +1,22 @@
-# ingestion/writer.py
 import uuid
 from PIL import Image
-from common.storage import upload_image, upload_json
+from common.storage import upload_image, upload_json, upload_raw_html, write_local_count
 from accumulation.counter import increment
-from accumulation.dedup import is_duplicate   # ← add this
+from accumulation.dedup import is_duplicate
 from common.logging import get_logger
 from ingestion.converter import chandra_to_docling
 
 log = get_logger(__name__)
 
 
-def save_sample(image_path: str, chandra_html: str) -> int | None:
+def save_sample(image_path: str, chandra_html: str) -> bool:
     """
-    Convert Chandra HTML → doctags, check for duplicates, save to HF.
-    Returns new count if saved, None if duplicate.
+    Returns True if saved successfully, False if duplicate or error.
+    Does NOT increment counter — caller handles batch increment.
     """
-    # dedup check before doing anything
     if is_duplicate(image_path):
         log.info(f"Duplicate skipped: {image_path}")
-        return None
+        return False
 
     sample_id = uuid.uuid4().hex
 
@@ -29,14 +27,19 @@ def save_sample(image_path: str, chandra_html: str) -> int | None:
 
     hf_image_path    = f"images/{sample_id}.png"
     hf_manifest_path = f"manifests/{sample_id}.jsonl"
+    hf_raw_path      = f"chandra_raw/{sample_id}.html"
 
     upload_image(image_path, hf_image_path)
+    upload_raw_html(chandra_html, hf_raw_path)
     upload_json({
         "image_path":  hf_image_path,
         "output_text": doctags,
+        "chandra_raw": hf_raw_path,
         "source":      "colab-ingest",
+        "img_w":       img_w,
+        "img_h":       img_h,
     }, hf_manifest_path)
 
-    new_count = increment()
-    log.info(f"Sample saved. Total count: {new_count}")
-    return new_count
+    write_local_count()
+    log.info(f"Sample {sample_id} saved")
+    return True    

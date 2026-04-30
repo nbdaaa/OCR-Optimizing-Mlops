@@ -7,3 +7,7 @@ dist/
 wandb/
 *.jpg
 *.pdf
+data/repo
+data/done
+data/failed
+data/*.pdf
