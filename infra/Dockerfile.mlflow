@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir \
+    mlflow==2.13.0 \
+    psycopg2-binary==2.9.9 \
+    boto3==1.34.0 \
+    && rm -rf /root/.cache
+
+EXPOSE 5000
