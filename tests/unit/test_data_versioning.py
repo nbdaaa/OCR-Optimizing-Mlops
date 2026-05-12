@@ -358,9 +358,13 @@ class TestPHashDedup:
         assert len(result) == 1
 
     def test_stats_phash_removed_count(self):
+        import numpy as np
         base = solid_pil("white", size=(128, 128))
         small = base.resize((32, 32)).resize((64, 64))
-        samples = [make_sample(base), make_sample(small), make_sample(solid_pil("black"))]
+        # Random noise image — clearly different pHash from any solid-color image
+        rng = np.random.default_rng(42)
+        noise = Image.fromarray(rng.integers(0, 256, (64, 64, 3), dtype=np.uint8))
+        samples = [make_sample(base), make_sample(small), make_sample(noise)]
         _, stats = phash_dedup(samples, threshold=8)
         assert stats["phash_removed"] == 1
 
