@@ -30,6 +30,7 @@ class ScalerConfig:
     gpu_template_id: str
     nginx_upstream_conf: str
     state_file: str
+    prometheus_targets_file: str = "infra/prometheus/targets.json"
     scale_up_threshold: float = 5.0
     scale_down_threshold: float = 1.5
     min_instances: int = 1
@@ -86,6 +87,7 @@ class AutoScaler:
         self.state.instances.append(new_instance)
         self.state.last_scale_time = time.time()
         self._write_nginx_upstream()
+        self._write_prometheus_targets()
         self.save_state()
 
     def scale_down(self) -> None:
@@ -97,6 +99,7 @@ class AutoScaler:
         self.state.last_scale_time = time.time()
         self._destroy_vast_instance(instance["id"])
         self._write_nginx_upstream()
+        self._write_prometheus_targets()
         self.save_state()
 
     # ── Nginx ─────────────────────────────────────────────────────────────────
@@ -117,6 +120,18 @@ class AutoScaler:
     def _reload_nginx(self) -> None:
         """Send `nginx -s reload` to apply the updated upstream config."""
         subprocess.run(["nginx", "-s", "reload"], check=True)
+
+    def _write_prometheus_targets(self) -> None:
+        """
+        Write Prometheus file_sd targets.json with current instance addresses.
+        Prometheus watches this file (refresh_interval: 15s) and automatically
+        updates scrape targets when instances are added or removed.
+        Format: [{"targets": ["<host>:8000", ...], "labels": {"job": "vllm"}}]
+        """
+        targets = [inst["address"] for inst in self.state.instances]
+        content = [{"targets": targets, "labels": {"job": "vllm"}}]
+        with open(self.config.prometheus_targets_file, "w") as f:
+            json.dump(content, f, indent=2)
 
     # ── State persistence ─────────────────────────────────────────────────────
 

@@ -17,6 +17,7 @@ def config(tmp_path):
         poll_interval=30,
         nginx_upstream_conf=str(tmp_path / "upstream.conf"),
         state_file=str(tmp_path / "scaler_state.json"),
+        prometheus_targets_file=str(tmp_path / "targets.json"),
         vast_api_key="fake-key",
         gpu_template_id="template-123",
     )
@@ -207,6 +208,7 @@ class TestScaleUpFlow:
         with (
             patch.object(scaler_one_instance, "_create_vast_instance", return_value=new_instance),
             patch.object(scaler_one_instance, "_write_nginx_upstream"),
+            patch.object(scaler_one_instance, "_write_prometheus_targets"),
             patch.object(scaler_one_instance, "save_state"),
         ):
             scaler_one_instance.scale_up()
@@ -219,10 +221,22 @@ class TestScaleUpFlow:
         with (
             patch.object(scaler_one_instance, "_create_vast_instance", return_value=new_instance),
             patch.object(scaler_one_instance, "_write_nginx_upstream"),
+            patch.object(scaler_one_instance, "_write_prometheus_targets"),
             patch.object(scaler_one_instance, "save_state"),
         ):
             scaler_one_instance.scale_up()
         assert scaler_one_instance.state.last_scale_time >= before
+
+    def test_prometheus_targets_called_on_scale_up(self, scaler_one_instance):
+        new_instance = {"id": "inst-new", "address": "10.0.0.99:8000"}
+        with (
+            patch.object(scaler_one_instance, "_create_vast_instance", return_value=new_instance),
+            patch.object(scaler_one_instance, "_write_nginx_upstream"),
+            patch.object(scaler_one_instance, "_write_prometheus_targets") as mock_prom,
+            patch.object(scaler_one_instance, "save_state"),
+        ):
+            scaler_one_instance.scale_up()
+        mock_prom.assert_called_once()
 
 
 class TestScaleDownFlow:
@@ -230,6 +244,7 @@ class TestScaleDownFlow:
         with (
             patch.object(scaler_two_instances, "_destroy_vast_instance"),
             patch.object(scaler_two_instances, "_write_nginx_upstream"),
+            patch.object(scaler_two_instances, "_write_prometheus_targets"),
             patch.object(scaler_two_instances, "save_state"),
         ):
             scaler_two_instances.scale_down()
@@ -240,7 +255,52 @@ class TestScaleDownFlow:
         with (
             patch.object(scaler_two_instances, "_destroy_vast_instance"),
             patch.object(scaler_two_instances, "_write_nginx_upstream"),
+            patch.object(scaler_two_instances, "_write_prometheus_targets"),
             patch.object(scaler_two_instances, "save_state"),
         ):
             scaler_two_instances.scale_down()
         assert scaler_two_instances.state.last_scale_time >= before
+
+    def test_prometheus_targets_called_on_scale_down(self, scaler_two_instances):
+        with (
+            patch.object(scaler_two_instances, "_destroy_vast_instance"),
+            patch.object(scaler_two_instances, "_write_nginx_upstream"),
+            patch.object(scaler_two_instances, "_write_prometheus_targets") as mock_prom,
+            patch.object(scaler_two_instances, "save_state"),
+        ):
+            scaler_two_instances.scale_down()
+        mock_prom.assert_called_once()
+
+
+class TestPrometheusTargetsWrite:
+    def test_creates_targets_file(self, scaler_one_instance):
+        import os
+        path = scaler_one_instance.config.prometheus_targets_file
+        if os.path.exists(path):
+            os.remove(path)
+        scaler_one_instance._write_prometheus_targets()
+        assert os.path.exists(path)
+
+    def test_targets_contain_instance_addresses(self, scaler_two_instances):
+        scaler_two_instances._write_prometheus_targets()
+        content = json.loads(open(scaler_two_instances.config.prometheus_targets_file).read())
+        targets = content[0]["targets"]
+        assert "10.0.0.1:8000" in targets
+        assert "10.0.0.2:8000" in targets
+
+    def test_targets_empty_when_no_instances(self, config):
+        s = AutoScaler(config)
+        s.state = ScalerState(instances=[], last_scale_time=0.0)
+        s._write_prometheus_targets()
+        content = json.loads(open(config.prometheus_targets_file).read())
+        assert content[0]["targets"] == []
+
+    def test_removed_instance_not_in_targets(self, scaler_one_instance):
+        scaler_one_instance._write_prometheus_targets()
+        content = json.loads(open(scaler_one_instance.config.prometheus_targets_file).read())
+        assert "10.0.0.2:8000" not in content[0]["targets"]
+
+    def test_targets_job_label_is_vllm(self, scaler_one_instance):
+        scaler_one_instance._write_prometheus_targets()
+        content = json.loads(open(scaler_one_instance.config.prometheus_targets_file).read())
+        assert content[0]["labels"]["job"] == "vllm"
