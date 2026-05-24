@@ -18,6 +18,7 @@ def config(tmp_path):
         nginx_upstream_conf=str(tmp_path / "upstream.conf"),
         state_file=str(tmp_path / "scaler_state.json"),
         prometheus_targets_file=str(tmp_path / "targets.json"),
+        nginx_container_name="infra-nginx-1",
         vast_api_key="fake-key",
         gpu_template_id="template-123",
     )
@@ -122,6 +123,22 @@ class TestInstanceLimits:
 
     def test_returns_bool_scale_down(self, scaler_one_instance):
         assert isinstance(scaler_one_instance.can_scale_down(), bool)
+
+
+class TestNginxReload:
+    def test_calls_docker_exec_with_container_name(self, scaler_one_instance):
+        with patch("subprocess.run") as mock_run:
+            scaler_one_instance._reload_nginx()
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["docker", "exec", "infra-nginx-1", "nginx", "-s", "reload"]
+
+    def test_calls_subprocess_run_with_check_true(self, scaler_one_instance):
+        with patch("subprocess.run") as mock_run:
+            scaler_one_instance._reload_nginx()
+        mock_run.assert_called_once_with(
+            ["docker", "exec", "infra-nginx-1", "nginx", "-s", "reload"],
+            check=True,
+        )
 
 
 class TestNginxUpstreamWrite:

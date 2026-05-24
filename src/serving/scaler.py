@@ -31,6 +31,7 @@ class ScalerConfig:
     nginx_upstream_conf: str
     state_file: str
     prometheus_targets_file: str = "infra/prometheus/targets.json"
+    nginx_container_name: str = "infra-nginx-1"
     scale_up_threshold: float = 5.0
     scale_down_threshold: float = 1.5
     min_instances: int = 1
@@ -118,8 +119,11 @@ class AutoScaler:
         self._reload_nginx()
 
     def _reload_nginx(self) -> None:
-        """Send `nginx -s reload` to apply the updated upstream config."""
-        subprocess.run(["nginx", "-s", "reload"], check=True)
+        """Send `nginx -s reload` inside the nginx container to apply the updated upstream config."""
+        subprocess.run(
+            ["docker", "exec", self.config.nginx_container_name, "nginx", "-s", "reload"],
+            check=True,
+        )
 
     def _write_prometheus_targets(self) -> None:
         """
