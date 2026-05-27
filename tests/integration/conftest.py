@@ -15,6 +15,10 @@ from src.api.main import app
 
 load_dotenv()
 
+# MLflow's internal boto3 reads AWS_* vars, not MINIO_* vars.
+os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("MINIO_ACCESS_KEY", ""))
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", ""))
+
 
 @pytest.fixture(scope="module")
 def client():
