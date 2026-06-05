@@ -19,6 +19,7 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from datasets import load_dataset
+from tqdm import tqdm
 from src.data.data_versioning import create_version, get_next_offset
 
 
@@ -42,7 +43,8 @@ def main():
     start_offset = get_next_offset(bucket)
 
     print(f"Loading dataset from {hf_repo} ...")
-    all_samples = list(load_dataset(hf_repo, split="train", streaming=False))
+    ds = load_dataset(hf_repo, split="train", streaming=False)
+    all_samples = list(tqdm(ds, total=len(ds), desc="Converting samples"))
     total_samples = len(all_samples)
     print(f"Loaded {total_samples:,} samples. Resuming from offset {start_offset:,}.\n")
 
