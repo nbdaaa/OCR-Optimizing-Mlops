@@ -51,6 +51,7 @@ def build_metadata(
     hf_repo: str,
     filter_stats: dict,
     split: str,
+    offset: int,
 ) -> dict:
     """Build metadata dict for a data version (stored alongside dataset.parquet)."""
     return {
@@ -59,6 +60,7 @@ def build_metadata(
         "hf_repo": hf_repo,
         "filter_stats": filter_stats,
         "split": split,
+        "offset": offset,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -171,6 +173,39 @@ def phash_dedup(samples: list[dict], threshold: int = 8) -> tuple[list[dict], di
     return result, {"phash_removed": phash_removed, "phash_groups": phash_groups, "threshold": threshold}
 
 
+# ── Offset ───────────────────────────────────────────────────────────────────
+
+def get_next_offset(bucket: str) -> int:
+    """
+    Sum filter_stats.total across all existing versions in MinIO.
+    This equals the number of raw HF samples already consumed, which is
+    the correct starting offset for the next version.
+    Returns 0 if no versions exist yet.
+    """
+    client = boto3.client(
+        "s3",
+        endpoint_url=os.environ["MINIO_ENDPOINT"],
+        aws_access_key_id=os.environ["MINIO_ACCESS_KEY"],
+        aws_secret_access_key=os.environ["MINIO_SECRET_KEY"],
+    )
+    try:
+        response = client.list_objects_v2(Bucket=bucket, Delimiter="/")
+        prefixes = response.get("CommonPrefixes", [])
+    except Exception:
+        return 0
+
+    total_consumed = 0
+    for prefix in prefixes:
+        try:
+            obj = client.get_object(Bucket=bucket, Key=f"{prefix['Prefix']}metadata.json")
+            meta = json.loads(obj["Body"].read())
+            total_consumed += meta.get("filter_stats", {}).get("total", 0)
+        except Exception:
+            continue
+
+    return total_consumed
+
+
 # ── Storage ───────────────────────────────────────────────────────────────────
 
 def upload_to_minio(local_dir: str, version: str) -> None:
@@ -213,12 +248,24 @@ def log_to_mlflow(version: str, metadata: dict, local_parquet: str) -> str:
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
-def create_version(version: str, max_samples: int | None = None) -> dict:
+def create_version(
+    version: str,
+    max_samples: int | None = None,
+    samples: list | None = None,
+    offset: int | None = None,
+) -> dict:
     """
     Full pipeline: HF Hub → filter → exact_dedup → phash_dedup → MinIO + MLflow.
 
+    Args:
+        version:     Version name, e.g. "v1".
+        max_samples: Max raw samples to take from HF (ignored when samples provided).
+        samples:     Pre-loaded sample list. When provided, skips HF download and
+                     offset calculation entirely — caller is responsible for slicing.
+                     Useful when loading the full dataset once and iterating in a loop.
+
     Steps:
-        1. Load samples from HF Hub (nbdaaa/all-ocr-data)
+        1. Load samples from HF Hub (nbdaaa/all-ocr-data) — skipped if samples given
         2. Filter with is_valid()
         3. exact_dedup()
         4. phash_dedup()
@@ -227,14 +274,23 @@ def create_version(version: str, max_samples: int | None = None) -> dict:
         7. upload_to_minio()
         8. log_to_mlflow()
 
-    Returns metadata dict.
+    Returns metadata dict (includes mlflow_run_id).
     """
     hf_repo = os.environ.get("HF_REPO_DATA", "nbdaaa/all-ocr-data")
+    bucket  = os.environ.get("MINIO_BUCKET_DATA", "ocr-data")
 
-    samples = list(load_dataset(hf_repo, split="train", streaming=False))
-    if max_samples:
-        samples = samples[:max_samples]
-    total = len(samples)
+    if samples is not None:
+        # Pre-loaded path: caller sliced the dataset and tracks offset externally.
+        offset = offset if offset is not None else 0
+        total  = len(samples)
+    else:
+        # Auto path: load from HF and calculate offset from existing versions.
+        offset      = get_next_offset(bucket)
+        all_samples = list(load_dataset(hf_repo, split="train", streaming=False))
+        samples     = all_samples[offset:]
+        if max_samples:
+            samples = samples[:max_samples]
+        total = len(samples)
 
     samples = [s for s in samples if is_valid(s)]
     rejected_invalid = total - len(samples)
@@ -256,6 +312,7 @@ def create_version(version: str, max_samples: int | None = None) -> dict:
         hf_repo=hf_repo,
         filter_stats=filter_stats,
         split="train",
+        offset=offset,
     )
 
     with tempfile.TemporaryDirectory() as tmp:

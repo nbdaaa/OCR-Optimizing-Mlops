@@ -27,29 +27,77 @@ _STATUS_MAP = {
 
 _EXPERIMENT = "ocr-training"
 
+# Env vars forwarded to the training instance's .env file
+_FORWARDED_VARS = [
+    "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET_DATA",
+    "MLFLOW_TRACKING_URI", "MLFLOW_S3_ENDPOINT_URL",
+    "HF_TOKEN", "HF_REPO_DATA",
+    "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY",
+]
 
-def _ssh_launch(run_id: str, data_version: str) -> None:
-    """Fire-and-forget: SSH into the Vast.ai training instance and start train.py."""
-    host     = os.environ["VAST_TRAIN_HOST"]
-    port     = os.environ.get("VAST_TRAIN_PORT", "22")
-    user     = os.environ.get("VAST_TRAIN_USER", "root")
+
+def _build_env_block() -> str:
+    """Collect relevant env vars to write as .env on the remote instance."""
+    return "\n".join(
+        f"{var}={os.environ[var]}"
+        for var in _FORWARDED_VARS
+        if os.environ.get(var)
+    )
+
+
+def _provision_and_train(run_id: str, data_version: str) -> None:
+    """
+    Background task:
+      1. Provision a Vast.ai GPU instance from GPU_TRAIN_TEMPLATE_ID.
+      2. SSH in, clone repo, install deps, write .env.
+      3. Launch train.py with the pre-created run_id (non-blocking).
+    Logs flow to MLflow + W&B automatically via train.py.
+    """
+    from src.serving.scaler import AutoScaler, ScalerConfig
+
+    # 1. Provision Vast.ai training instance
+    cfg = ScalerConfig(
+        vast_api_key=os.environ["VAST_API_KEY"],
+        gpu_template_id=os.environ["GPU_TRAIN_TEMPLATE_ID"],
+        nginx_upstream_conf="",   # unused for training
+        state_file="",            # unused for training
+    )
+    instance = AutoScaler(cfg)._create_vast_instance()
+    host     = instance["address"].split(":")[0]
+    ssh_port = instance["ssh_port"]
+
     key      = os.environ.get("VAST_TRAIN_KEY", os.path.expanduser("~/.ssh/id_rsa"))
     work_dir = os.environ.get("REMOTE_WORK_DIR", "/workspace/OCR-Optimizing-Mlops")
+    git_repo = os.environ["GIT_REPO_URL"]
+    user     = os.environ.get("VAST_TRAIN_USER", "root")
 
-    remote_cmd = (
-        f"cd {work_dir} && "
-        f"nohup python src/training/train.py "
-        f"--data-version {data_version} --run-id {run_id} "
-        f"> /tmp/train_{run_id}.log 2>&1 &"
-    )
+    # 2. Build remote setup + launch script
+    env_block = _build_env_block()
+    script = f"""set -e
+if [ -d {work_dir}/.git ]; then
+    git -C {work_dir} pull
+else
+    git clone {git_repo} {work_dir}
+fi
+pip install -q -r {work_dir}/requirements-train.txt
+cat > {work_dir}/.env << 'ENVEOF'
+{env_block}
+ENVEOF
+cd {work_dir}
+nohup python src/training/train.py \\
+    --data-version {data_version} \\
+    --run-id {run_id} \\
+    > /tmp/train_{run_id}.log 2>&1 &
+"""
+
     subprocess.Popen([
         "ssh",
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
-        "-p", port,
+        "-p", ssh_port,
         "-i", key,
         f"{user}@{host}",
-        remote_cmd,
+        script,
     ])
 
 
@@ -60,14 +108,20 @@ def trigger_training(
     client=Depends(get_mlflow_client),
 ):
     """
-    Start a training job on Vast.ai using the specified data version.
+    Trigger a training job on a fresh Vast.ai GPU instance.
 
-    Pre-creates an MLflow run (RUNNING), SSHes into the GPU instance in the
-    background, and returns the run_id immediately as job_id.
-    Poll /training/{job_id}/status to track progress.
+    Flow:
+      1. Validate required env vars.
+      2. Pre-create an MLflow run (RUNNING) → get run_id.
+      3. In background: provision instance → clone repo → install deps → run train.py.
+      4. Return run_id immediately as job_id.
+
+    Poll /training/{job_id}/status to track progress via MLflow.
+    Training logs also appear in W&B (project: WANDB_PROJECT).
     """
-    if not os.environ.get("VAST_TRAIN_HOST"):
-        raise HTTPException(status_code=503, detail="VAST_TRAIN_HOST not configured")
+    for var in ("VAST_API_KEY", "GPU_TRAIN_TEMPLATE_ID", "GIT_REPO_URL"):
+        if not os.environ.get(var):
+            raise HTTPException(status_code=503, detail=f"{var} not configured")
 
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
     experiment = mlflow.set_experiment(_EXPERIMENT)
@@ -77,7 +131,7 @@ def trigger_training(
     )
     run_id = run.info.run_id
 
-    background_tasks.add_task(_ssh_launch, run_id, request.data_version)
+    background_tasks.add_task(_provision_and_train, run_id, request.data_version)
     return TriggerTrainingResponse(job_id=run_id)
 
 
@@ -98,7 +152,6 @@ def get_training_status(job_id: str, client=Depends(get_mlflow_client)):
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
     mlflow_url = f"{tracking_uri}/#/experiments/{run.info.experiment_id}/runs/{job_id}"
     wandb_url = run.data.tags.get("wandb_url")
-
     metrics = dict(run.data.metrics) or None
 
     return TrainingJobStatus(

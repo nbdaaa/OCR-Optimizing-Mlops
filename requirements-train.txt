@@ -1,0 +1,10 @@
+# ── GPU / Training deps — install on Vast.ai instance only ───────────────────
+-r requirements.txt
+
+torch>=2.3.0
+transformers>=4.41.0
+peft>=0.11.0
+trl>=0.8.0
+accelerate>=0.30.0
+jiwer>=3.0.4
+vllm>=0.5.0

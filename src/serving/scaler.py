@@ -203,7 +203,8 @@ class AutoScaler:
             inst = status_resp.json().get("instances", [{}])[0]
             if inst.get("actual_status") == "running":
                 host = inst["public_ipaddr"]
-                return {"id": instance_id, "address": f"{host}:8000"}
+                ssh_port = str(inst.get("ssh_port", 22))
+                return {"id": instance_id, "address": f"{host}:8000", "ssh_port": ssh_port}
 
         raise TimeoutError(
             f"Instance {instance_id} did not reach 'running' within "

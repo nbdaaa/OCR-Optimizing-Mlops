@@ -21,6 +21,7 @@ class VersionInfo(BaseModel):
     split: str
     created_at: str
     filter_stats: dict[str, Any]
+    offset: int = 0
     mlflow_run_id: str | None = None
 
 
@@ -64,6 +65,21 @@ class ModelVersionInfo(BaseModel):
 
 class ModelVersionListResponse(BaseModel):
     versions: list[ModelVersionInfo]
+
+
+# ── CI/CD gate ────────────────────────────────────────────────────────────────
+
+class CIGateRequest(BaseModel):
+    cer_threshold: float = 0.15
+    regression_tolerance: float = 1.05
+
+
+class CIGateResponse(BaseModel):
+    result: str                          # "pass" | "fail_cer" | "fail_regression"
+    staging_version: int
+    staging_cer: float
+    production_cer: float | None = None
+    new_stage: str                       # "Production" | "Archived"
 
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
