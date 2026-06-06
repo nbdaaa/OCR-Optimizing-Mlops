@@ -20,6 +20,7 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from datasets import load_dataset
+from tqdm import tqdm
 from src.data.data_versioning import create_version, get_next_offset
 
 
@@ -61,7 +62,12 @@ def main():
         print(f"[{version}] offset={chunk_start:,}  samples={chunk_end - chunk_start:,} ...", end=" ", flush=True)
 
         # select() chỉ decode đúng chunk này, không đụng đến phần còn lại
-        chunk_samples = list(ds.select(range(chunk_start, chunk_end)))
+        chunk_samples = list(tqdm(
+            ds.select(range(chunk_start, chunk_end)),
+            total=chunk_end - chunk_start,
+            desc="  decoding",
+            leave=False,
+        ))
 
         metadata = create_version(
             version=version,
