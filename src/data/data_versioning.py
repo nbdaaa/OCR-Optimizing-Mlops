@@ -330,13 +330,16 @@ def create_version(
         parquet_path = os.path.join(tmp, "dataset.parquet")
         meta_path = os.path.join(tmp, "metadata.json")
 
-        print(f"  [4/5] saving parquet ...", flush=True)
+        print(f"  [4/5] saving parquet ({len(samples):,} rows) ...", flush=True)
         pd.DataFrame(samples).to_parquet(parquet_path, index=False)
+        size_mb = os.path.getsize(parquet_path) / 1024 / 1024
+        print(f"        → {size_mb:.1f} MB", flush=True)
         with open(meta_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
-        print(f"  [5/5] uploading to MinIO + logging to MLflow ...", flush=True)
+        print(f"  [5/5] uploading to MinIO ...", flush=True)
         upload_to_minio(tmp, version)
+        print(f"        logging to MLflow ...", flush=True)
         run_id = log_to_mlflow(version, metadata, parquet_path)
 
     metadata["mlflow_run_id"] = run_id
