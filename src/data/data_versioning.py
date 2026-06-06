@@ -292,11 +292,18 @@ def create_version(
             samples = samples[:max_samples]
         total = len(samples)
 
+    print(f"  [1/5] filtering invalid samples ({total:,} total) ...", flush=True)
     samples = [s for s in samples if is_valid(s)]
     rejected_invalid = total - len(samples)
+    print(f"        → {len(samples):,} valid  ({rejected_invalid:,} rejected)", flush=True)
 
+    print(f"  [2/5] exact dedup ...", flush=True)
     samples, exact_stats = exact_dedup(samples)
+    print(f"        → {len(samples):,} remain  ({exact_stats['exact_removed']} removed)", flush=True)
+
+    print(f"  [3/5] phash dedup ({len(samples):,} samples, O(n²)) ...", flush=True)
     samples, phash_stats = phash_dedup(samples)
+    print(f"        → {len(samples):,} remain  ({phash_stats['phash_removed']} removed)", flush=True)
 
     filter_stats = {
         "total": total,
@@ -319,10 +326,12 @@ def create_version(
         parquet_path = os.path.join(tmp, "dataset.parquet")
         meta_path = os.path.join(tmp, "metadata.json")
 
+        print(f"  [4/5] saving parquet ...", flush=True)
         pd.DataFrame(samples).to_parquet(parquet_path, index=False)
         with open(meta_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
+        print(f"  [5/5] uploading to MinIO + logging to MLflow ...", flush=True)
         upload_to_minio(tmp, version)
         run_id = log_to_mlflow(version, metadata, parquet_path)
 
