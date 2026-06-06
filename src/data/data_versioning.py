@@ -18,6 +18,7 @@ import mlflow
 import pandas as pd
 from datasets import load_dataset
 from PIL import Image
+from tqdm import tqdm
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -131,7 +132,10 @@ def phash_dedup(samples: list[dict], threshold: int = 8) -> tuple[list[dict], di
         return [], {"phash_removed": 0, "phash_groups": 0, "threshold": threshold}
 
     n = len(samples)
-    hashes = [compute_phash(s["image"]) for s in samples]
+    hashes = [
+        compute_phash(s["image"])
+        for s in tqdm(samples, desc="    computing pHash", leave=False)
+    ]
 
     # Union-Find
     parent = list(range(n))
@@ -148,7 +152,7 @@ def phash_dedup(samples: list[dict], threshold: int = 8) -> tuple[list[dict], di
             parent[px] = py
 
     # O(n²) — acceptable for offline versioning workload
-    for i in range(n):
+    for i in tqdm(range(n), desc="    comparing pairs", leave=False):
         for j in range(i + 1, n):
             if (hashes[i] - hashes[j]) <= threshold:
                 union(i, j)
