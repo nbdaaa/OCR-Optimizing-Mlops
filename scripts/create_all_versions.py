@@ -20,6 +20,7 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from datasets import load_dataset, Image as HFImage
+from tqdm import tqdm
 from src.data.data_versioning import create_version, get_next_offset
 
 
@@ -50,9 +51,9 @@ def main():
 
     start_offset = get_next_offset(bucket)
 
-    print(f"Loading dataset index from {hf_repo} ...")
+    print(f"Loading dataset index from {hf_repo} ...", flush=True)
     ds = load_dataset(hf_repo, split="train", streaming=False)
-    # Disable PIL decoding — keeps images as raw bytes, much faster
+    print("Disabling PIL decoding ...", flush=True)
     ds = ds.cast_column("image", HFImage(decode=False))
     total_samples = len(ds)
     print(f"Dataset has {total_samples:,} samples. Resuming from offset {start_offset:,}.\n")
@@ -68,12 +69,17 @@ def main():
         chunk_end = min(chunk_start + chunk_size, total_samples)
         version   = f"{args.prefix}{version_num}"
 
-        print(f"[{version}] offset={chunk_start:,}  samples={chunk_end - chunk_start:,} ...", end=" ", flush=True)
+        print(f"\n[{version}] offset={chunk_start:,}  samples={chunk_end - chunk_start:,}", flush=True)
 
         chunk_samples = [
             _extract_bytes(s)
-            for s in ds.select(range(chunk_start, chunk_end))
+            for s in tqdm(
+                ds.select(range(chunk_start, chunk_end)),
+                total=chunk_end - chunk_start,
+                desc="  reading",
+            )
         ]
+        print("  filtering + dedup + upload ...", flush=True)
 
         metadata = create_version(
             version=version,
