@@ -1,8 +1,8 @@
 """
 Create data versions sequentially until the full dataset is exhausted.
 
-Uses ds.select() to decode only the current chunk — avoids loading all
-100k images into RAM at once.
+Uses cast_column(decode=False) to keep images as raw bytes instead of
+decoding to PIL — avoids the massive slowdown from image decoding.
 
 Usage:
     python scripts/create_all_versions.py
@@ -19,9 +19,17 @@ load_dotenv()
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from datasets import load_dataset
-from tqdm import tqdm
+from datasets import load_dataset, Image as HFImage
 from src.data.data_versioning import create_version, get_next_offset
+
+
+def _extract_bytes(sample: dict) -> dict:
+    """Normalize HF image field: {"bytes": ..., "path": ...} → raw bytes."""
+    img = sample.get("image")
+    if isinstance(img, dict):
+        sample = dict(sample)
+        sample["image"] = img.get("bytes")
+    return sample
 
 
 def main():
@@ -40,11 +48,12 @@ def main():
     hf_repo    = os.environ.get("HF_REPO_DATA", "nbdaaa/all-ocr-data")
     chunk_size = args.samples_per_version
 
-    start_offset  = get_next_offset(bucket)
+    start_offset = get_next_offset(bucket)
 
-    # Load dataset as Arrow-backed object — fast, does NOT decode images yet
     print(f"Loading dataset index from {hf_repo} ...")
     ds = load_dataset(hf_repo, split="train", streaming=False)
+    # Disable PIL decoding — keeps images as raw bytes, much faster
+    ds = ds.cast_column("image", HFImage(decode=False))
     total_samples = len(ds)
     print(f"Dataset has {total_samples:,} samples. Resuming from offset {start_offset:,}.\n")
 
@@ -56,18 +65,15 @@ def main():
     total_created = 0
 
     for chunk_start in range(start_offset, total_samples, chunk_size):
-        chunk_end     = min(chunk_start + chunk_size, total_samples)
-        version       = f"{args.prefix}{version_num}"
+        chunk_end = min(chunk_start + chunk_size, total_samples)
+        version   = f"{args.prefix}{version_num}"
 
         print(f"[{version}] offset={chunk_start:,}  samples={chunk_end - chunk_start:,} ...", end=" ", flush=True)
 
-        # select() chỉ decode đúng chunk này, không đụng đến phần còn lại
-        chunk_samples = list(tqdm(
-            ds.select(range(chunk_start, chunk_end)),
-            total=chunk_end - chunk_start,
-            desc="  decoding",
-            leave=False,
-        ))
+        chunk_samples = [
+            _extract_bytes(s)
+            for s in ds.select(range(chunk_start, chunk_end))
+        ]
 
         metadata = create_version(
             version=version,
