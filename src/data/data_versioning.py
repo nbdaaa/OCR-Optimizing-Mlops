@@ -330,8 +330,10 @@ def create_version(
         parquet_path = os.path.join(tmp, "dataset.parquet")
         meta_path = os.path.join(tmp, "metadata.json")
 
-        print(f"  [4/5] saving parquet ({len(samples):,} rows) ...", flush=True)
-        pd.DataFrame(samples).to_parquet(parquet_path, index=False)
+        print(f"  [4/5] building DataFrame ({len(samples):,} rows) ...", flush=True)
+        df = pd.DataFrame(samples)
+        print(f"        writing parquet ...", flush=True)
+        df.to_parquet(parquet_path, index=False)
         size_mb = os.path.getsize(parquet_path) / 1024 / 1024
         print(f"        → {size_mb:.1f} MB", flush=True)
         with open(meta_path, "w") as f:
