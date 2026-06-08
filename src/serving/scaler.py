@@ -209,7 +209,7 @@ class AutoScaler:
         }
 
         resp = requests.put(
-            f"{_VAST_BASE}/bundles/",
+            f"{_VAST_BASE}/search/asks/",
             params={"api_key": self.config.vast_api_key},
             json={"q": query},
             timeout=30,

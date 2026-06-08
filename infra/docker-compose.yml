@@ -122,6 +122,9 @@ services:
       TRAIN_DOCKER_IMAGE: ${TRAIN_DOCKER_IMAGE}
       GIT_REPO_URL: ${GIT_REPO_URL}
       REMOTE_WORK_DIR: ${REMOTE_WORK_DIR}
+    volumes:
+      # Mount source so code changes apply on `up -d` (recreate) without rebuild
+      - ../src:/app/src:ro
     ports:
       - "8000:8000"
     networks:
