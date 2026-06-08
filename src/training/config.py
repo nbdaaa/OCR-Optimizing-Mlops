@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 @dataclass
 class TrainConfig:
     # ── Data ─────────────────────────────────────────────────────────────────
-    max_length: int = 6000
+    max_length: int = 4500
     minio_bucket: str = "ocr-data"
 
     # ── Training hyperparameters ──────────────────────────────────────────────

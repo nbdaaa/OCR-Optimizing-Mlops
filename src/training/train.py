@@ -35,8 +35,21 @@ def load_dataset_from_minio(
     s3_client=None,
     config: TrainConfig | None = None,
 ) -> pd.DataFrame:
-    """Download dataset.parquet from MinIO {bucket}/{version}/ and return as DataFrame."""
+    """
+    Load dataset.parquet for {version} as a DataFrame.
+
+    Caches the parquet locally under DATA_CACHE_DIR (default /tmp/ocr-data-cache)
+    so re-runs skip the MinIO download. The download streams to a .part file and
+    is atomically renamed, so an interrupted download never leaves a corrupt cache.
+    """
     cfg = config or TrainConfig()
+    cache_dir = os.environ.get("DATA_CACHE_DIR", "/tmp/ocr-data-cache")
+    local_path = os.path.join(cache_dir, version, "dataset.parquet")
+
+    if os.path.exists(local_path):
+        print(f"[train] using cached dataset {local_path}", flush=True)
+        return pd.read_parquet(local_path)
+
     if s3_client is None:
         s3_client = boto3.client(
             "s3",
@@ -49,15 +62,16 @@ def load_dataset_from_minio(
 
     total = int(resp.get("ContentLength", 0))
     body = resp["Body"]
-    buf = io.BytesIO()
-    with tqdm(
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    tmp_path = local_path + ".part"
+    with open(tmp_path, "wb") as f, tqdm(
         total=total, unit="B", unit_scale=True, desc="  downloading parquet"
     ) as pbar:
         for chunk in iter(lambda: body.read(1024 * 1024), b""):
-            buf.write(chunk)
+            f.write(chunk)
             pbar.update(len(chunk))
-    buf.seek(0)
-    return pd.read_parquet(buf)
+    os.replace(tmp_path, local_path)  # atomic — only complete downloads cached
+    return pd.read_parquet(local_path)
 
 
 # ── LoRA config ────────────────────────────────────────────────────────────────
