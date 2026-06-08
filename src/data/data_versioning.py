@@ -253,13 +253,20 @@ def write_parquet(samples: list[dict], path: str) -> None:
         if k == "image":
             # Normalize each image to raw bytes (handles bytes, PIL.Image, or
             # HF {"bytes": ...} dict) so the binary fast-path always applies.
-            img_bytes = [_image_to_bytes(v) for v in columns[k]]
+            img_bytes = [
+                _image_to_bytes(v)
+                for v in tqdm(columns[k], desc="        normalizing images", leave=False)
+            ]
+            total_mb = sum(len(b) for b in img_bytes if b) / 1024 / 1024
+            print(f"        image bytes: {total_mb:.1f} MB raw", flush=True)
             arrays.append(pa.array(img_bytes, type=pa.binary()))
         else:
             arrays.append(pa.array(columns[k]))
         names.append(k)
 
+    print(f"        building arrow table ...", flush=True)
     table = pa.Table.from_arrays(arrays, names=names)
+    print(f"        compressing + writing (zstd) ...", flush=True)
     pq.write_table(table, path, compression="zstd")
 
 
