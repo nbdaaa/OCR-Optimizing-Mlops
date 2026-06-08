@@ -287,6 +287,7 @@ def train(
     smoke_test: bool = False,
     config: TrainConfig | None = None,
     run_id: str | None = None,
+    resume_from_checkpoint: bool = False,
 ) -> str:
     """
     Full LoRA fine-tune pipeline:
@@ -355,7 +356,8 @@ def train(
         mlflow.log_params({**cfg.as_mlflow_params(), "data_version": data_version, "smoke_test": smoke_test})
         mlflow.set_tag("wandb_url", wandb.run.get_url())
 
-        print(f"[train] starting training (smoke_test={smoke_test}) ...", flush=True)
+        print(f"[train] starting training (smoke_test={smoke_test}, "
+              f"resume={resume_from_checkpoint}) ...", flush=True)
         trainer = Trainer(
             model=model,
             args=build_training_args(output_dir, cfg, smoke_test=smoke_test),
@@ -363,7 +365,7 @@ def train(
             eval_dataset=hf_dataset,
             data_collator=DataCollatorForOCR(processor, cfg),
         )
-        trainer.train()
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         print(f"[train] training done, saving adapter ...", flush=True)
 
         if trainer.state.log_history:
@@ -398,5 +400,15 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default="/tmp/ocr-adapter")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--run-id", default=None, help="Resume an existing MLflow run")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume training from the latest checkpoint in --output-dir",
+    )
     args = parser.parse_args()
-    print(train(args.data_version, args.output_dir, args.smoke_test, run_id=args.run_id))
+    print(train(
+        args.data_version,
+        args.output_dir,
+        args.smoke_test,
+        run_id=args.run_id,
+        resume_from_checkpoint=args.resume,
+    ))
