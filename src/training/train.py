@@ -110,9 +110,13 @@ def build_training_args(
         weight_decay=cfg.weight_decay,
         bf16=True,
         logging_steps=10,
-        eval_strategy="epoch",
+        # In-loop eval materializes full-sequence logits (text + thousands of
+        # image tokens) → ~8GB cross-entropy alloc that OOMs a 24GB card, even
+        # though the gradient-checkpointed training step fits. It only yields
+        # eval_loss anyway; CER is computed separately via evaluate.py.
+        eval_strategy="no",
         save_strategy="epoch",
-        load_best_model_at_end=True,
+        load_best_model_at_end=False,
         report_to=["mlflow", "wandb"],
         max_steps=1 if smoke_test else -1,
         # Keep raw columns (image, output_text, ...) — the custom collator needs
