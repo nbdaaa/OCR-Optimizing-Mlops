@@ -210,21 +210,27 @@ def train(
 
     hf_token = os.environ.get("HF_TOKEN")
 
+    print(f"[train] downloading dataset '{data_version}' from MinIO ...", flush=True)
     df = load_dataset_from_minio(data_version, config=cfg)
     hf_dataset = HFDataset.from_pandas(df)
+    print(f"[train] loaded {len(hf_dataset):,} samples", flush=True)
 
+    print(f"[train] loading processor ({cfg.base_model}) ...", flush=True)
     processor = AutoProcessor.from_pretrained(cfg.base_model, token=hf_token)
+    print(f"[train] loading base model (downloads from HF on first run) ...", flush=True)
     model = AutoVLM.from_pretrained(
         cfg.base_model,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         token=hf_token,
     )
+    print(f"[train] freezing base + applying LoRA ...", flush=True)
     for param in model.parameters():
         param.requires_grad = False
     model = get_peft_model(model, get_lora_config(cfg))
     model.print_trainable_parameters()
 
+    print(f"[train] init W&B ...", flush=True)
     wandb.init(
         project=os.environ.get("WANDB_PROJECT", "chandra-ocr"),
         entity=os.environ.get("WANDB_ENTITY", "ducanhcttp"),
@@ -236,6 +242,7 @@ def train(
         mlflow.log_params({**cfg.as_mlflow_params(), "data_version": data_version, "smoke_test": smoke_test})
         mlflow.set_tag("wandb_url", wandb.run.get_url())
 
+        print(f"[train] starting training (smoke_test={smoke_test}) ...", flush=True)
         trainer = Trainer(
             model=model,
             args=build_training_args(output_dir, cfg, smoke_test=smoke_test),
@@ -244,6 +251,7 @@ def train(
             data_collator=DataCollatorForOCR(processor, cfg),
         )
         trainer.train()
+        print(f"[train] training done, saving adapter ...", flush=True)
 
         if trainer.state.log_history:
             last = {k: v for d in trainer.state.log_history for k, v in d.items()}
