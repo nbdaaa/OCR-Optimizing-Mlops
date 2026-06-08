@@ -19,6 +19,10 @@ class TrainConfig:
     # ── Post-training CER eval (generate-based; for CI gate) ──────────────────
     cer_eval_samples: int = 50
 
+    # ── Checkpointing (resume granularity) ────────────────────────────────────
+    save_steps: int = 25          # save a checkpoint every N optimizer steps
+    save_total_limit: int = 3     # keep only the latest N checkpoints (disk cap)
+
     # ── Training hyperparameters ──────────────────────────────────────────────
     learning_rate: float = 5e-5
     batch_size: int = 1

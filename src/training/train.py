@@ -125,7 +125,9 @@ def build_training_args(
         # though the gradient-checkpointed training step fits. It only yields
         # eval_loss anyway; CER is computed separately via evaluate.py.
         eval_strategy="no",
-        save_strategy="epoch",
+        save_strategy="steps",
+        save_steps=cfg.save_steps,
+        save_total_limit=cfg.save_total_limit,
         load_best_model_at_end=False,
         report_to=["mlflow", "wandb"],
         max_steps=1 if smoke_test else -1,
