@@ -278,11 +278,21 @@ def upload_to_minio(local_dir: str, version: str) -> None:
         client.upload_file(os.path.join(local_dir, filename), bucket, f"{version}/{filename}")
 
 
-def log_to_mlflow(version: str, metadata: dict, local_parquet: str) -> str:
+def log_to_mlflow(version: str, metadata: dict, local_metadata_json: str) -> str:
     """
-    Start an MLflow run, log params + log_input + artifact.
+    Start an MLflow run, log params + log_input + the small metadata.json.
+
+    Note: the dataset parquet itself lives in the ocr-data bucket (uploaded by
+    upload_to_minio). We deliberately do NOT re-upload it as an MLflow artifact
+    to avoid duplicating hundreds of MB into the mlflow-artifacts bucket.
+    Only metadata.json is logged here for lineage tracking.
+
     Returns the MLflow run_id.
     """
+    # MLflow's internal boto3 reads AWS_* vars for MinIO access
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("MINIO_ACCESS_KEY", ""))
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", ""))
+
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
     mlflow.set_experiment("data-versioning")
 
@@ -294,7 +304,7 @@ def log_to_mlflow(version: str, metadata: dict, local_parquet: str) -> str:
             "count": metadata["count"],
             **metadata["filter_stats"],
         })
-        mlflow.log_artifact(local_parquet, artifact_path=version)
+        mlflow.log_artifact(local_metadata_json, artifact_path=version)
         mlflow.log_input(
             mlflow.data.from_pandas(pd.DataFrame([metadata]), source=metadata["hf_repo"]),
             context="data_versioning",
@@ -393,7 +403,7 @@ def create_version(
         print(f"  [5/5] uploading to MinIO ...", flush=True)
         upload_to_minio(tmp, version)
         print(f"        logging to MLflow ...", flush=True)
-        run_id = log_to_mlflow(version, metadata, parquet_path)
+        run_id = log_to_mlflow(version, metadata, meta_path)
 
     metadata["mlflow_run_id"] = run_id
     return metadata
