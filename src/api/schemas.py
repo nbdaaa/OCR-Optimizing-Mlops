@@ -50,6 +50,13 @@ class TrainingJobStatus(BaseModel):
     mlflow_run_url: str | None = None
     wandb_run_url: str | None = None
     metrics: dict[str, float] | None = None
+    vast_instance_id: str | None = None
+
+
+class TrainingLogsResponse(BaseModel):
+    job_id: str
+    instance_id: str
+    logs: str
 
 
 # ── Model registry ────────────────────────────────────────────────────────────

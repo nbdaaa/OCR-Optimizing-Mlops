@@ -243,7 +243,9 @@ class AutoScaler:
         )
         return str(best["id"])
 
-    def _create_vast_instance(self, image: str | None = None) -> dict:
+    def _create_vast_instance(
+        self, image: str | None = None, onstart: str | None = None
+    ) -> dict:
         """
         Call Vast.ai REST API to launch a new GPU instance.
         Uses gpu_template_id if set, otherwise auto-selects the cheapest offer
@@ -254,8 +256,10 @@ class AutoScaler:
         it to a dynamic external port, read back from the instance's `ports` info.
 
         Args:
-            image: Docker image for the instance. Serving uses the vLLM image
-                   (default); training passes its own PyTorch image.
+            image:   Docker image for the instance. Serving uses the vLLM image
+                     (default); training passes its own PyTorch image.
+            onstart: Bootstrap script the instance runs on boot (clone + install
+                     + run). When set, no SSH is needed — the instance self-runs.
         """
         img = image or os.environ.get("VLLM_DOCKER_IMAGE", "vllm/vllm-openai:latest")
         offer_id = self.config.gpu_template_id or self._find_best_offer()
@@ -268,6 +272,8 @@ class AutoScaler:
             # Expose the vLLM serving port; Vast assigns a dynamic external port.
             "env": "-p 8000:8000",
         }
+        if onstart:
+            payload["onstart"] = onstart
         resp = requests.put(
             url,
             params={"api_key": self.config.vast_api_key},

@@ -115,18 +115,13 @@ services:
       # (remote can't resolve docker network names like "minio")
       PUBLIC_MLFLOW_TRACKING_URI: ${PUBLIC_MLFLOW_TRACKING_URI}
       PUBLIC_MINIO_ENDPOINT: ${PUBLIC_MINIO_ENDPOINT}
-      # ── Vast.ai orchestration (training/deploy triggers) ──
+      # ── Vast.ai orchestration (training/deploy triggers, onstart-based) ──
       VAST_API_KEY: ${VAST_API_KEY}
       GPU_TEMPLATE_ID: ${GPU_TEMPLATE_ID}
       GPU_TRAIN_TEMPLATE_ID: ${GPU_TRAIN_TEMPLATE_ID}
       TRAIN_DOCKER_IMAGE: ${TRAIN_DOCKER_IMAGE}
       GIT_REPO_URL: ${GIT_REPO_URL}
-      VAST_TRAIN_USER: root
-      VAST_TRAIN_KEY: /root/.ssh/id_rsa
       REMOTE_WORK_DIR: ${REMOTE_WORK_DIR}
-    volumes:
-      # SSH key to reach Vast.ai instances (pubkey must be registered on Vast)
-      - ${VAST_SSH_KEY_HOST:-~/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
     ports:
       - "8000:8000"
     networks:

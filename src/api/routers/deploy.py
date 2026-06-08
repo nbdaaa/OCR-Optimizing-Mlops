@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 
-import mlflow
 from fastapi import APIRouter, Depends, HTTPException
 
 from src.api.deps import get_mlflow_client
@@ -24,12 +22,19 @@ router = APIRouter(prefix="/deploy", tags=["deploy"])
 _STATE_FILE = os.environ.get("SCALER_STATE_FILE", "scaler_state.json")
 _MODEL_NAME = "granite-docling-adapter"
 
+# Endpoint vars forwarded to the serving instance (public, not docker names)
+_FORWARD_PUBLIC = {
+    "MLFLOW_TRACKING_URI":    "PUBLIC_MLFLOW_TRACKING_URI",
+    "MLFLOW_S3_ENDPOINT_URL": "PUBLIC_MINIO_ENDPOINT",
+}
+_FORWARD_AS_IS = ["MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"]
+
 
 def _build_scaler() -> AutoScaler:
     """Instantiate AutoScaler from environment variables."""
     cfg = ScalerConfig(
         vast_api_key=os.environ["VAST_API_KEY"],
-        gpu_template_id=os.environ["GPU_TEMPLATE_ID"],
+        gpu_template_id=os.environ.get("GPU_TEMPLATE_ID", ""),  # ""→auto-select
         nginx_upstream_conf=os.environ.get(
             "NGINX_UPSTREAM_CONF", "infra/nginx/upstream.conf"
         ),
@@ -44,26 +49,30 @@ def _build_scaler() -> AutoScaler:
     return scaler
 
 
-def _ssh_start_vllm(host: str, ssh_port: str, instance_id: str) -> None:
-    """Fire-and-forget: SSH into the serving instance and start vllm_server.py."""
-    user     = os.environ.get("VAST_TRAIN_USER", "root")
-    key      = os.environ.get("VAST_TRAIN_KEY", os.path.expanduser("~/.ssh/id_rsa"))
+def _build_serve_onstart() -> str:
+    """Bootstrap script the serving instance runs on boot (clone + vllm_server)."""
     work_dir = os.environ.get("REMOTE_WORK_DIR", "/workspace/OCR-Optimizing-Mlops")
+    git_repo = os.environ["GIT_REPO_URL"]
 
-    remote_cmd = (
-        f"cd {work_dir} && "
-        f"nohup python src/serving/vllm_server.py --port 8000 "
-        f"> /tmp/vllm_{instance_id}.log 2>&1 &"
-    )
-    subprocess.Popen([
-        "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "BatchMode=yes",
-        "-p", ssh_port,
-        "-i", key,
-        f"{user}@{host}",
-        remote_cmd,
-    ])
+    lines = [f"{v}={os.environ[v]}" for v in _FORWARD_AS_IS if os.environ.get(v)]
+    for remote_name, src in _FORWARD_PUBLIC.items():
+        if os.environ.get(src):
+            lines.append(f"{remote_name}={os.environ[src]}")
+    env_block = "\n".join(lines)
+
+    return f"""#!/bin/bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+command -v git >/dev/null || (apt-get update && apt-get install -y git)
+rm -rf {work_dir}
+git clone --branch dev {git_repo} {work_dir}
+cd {work_dir}
+pip install -q -r requirements-serve.txt
+cat > .env <<'ENVEOF'
+{env_block}
+ENVEOF
+python src/serving/vllm_server.py --port 8000
+"""
 
 
 @router.post("/trigger", response_model=TriggerDeployResponse)
@@ -72,20 +81,18 @@ def trigger_deploy(
     client=Depends(get_mlflow_client),
 ):
     """
-    Deploy the Production model to a new vLLM instance on Vast.ai.
+    Deploy the Production model to a new vLLM instance on Vast.ai (onstart).
 
-    Flow:
-      1. Verify a Production version exists in MLflow Registry.
-      2. Provision a Vast.ai GPU instance (blocks until running, ~5 min).
-      3. SSH in and start vllm_server.py in background (non-blocking).
-      4. Register instance with scaler state, nginx upstream, prometheus targets.
-      5. Return instance_id and address.
+    1. Verify a Production version exists in MLflow Registry.
+    2. Provision a Vast.ai GPU instance whose onstart clones + runs vllm_server.py
+       (blocks until the instance is running, ~5 min).
+    3. Register instance with scaler state, nginx upstream, prometheus targets.
+    4. Return instance_id and address (host:mapped_port).
     """
-    for var in ("VAST_API_KEY", "GPU_TEMPLATE_ID"):
+    for var in ("VAST_API_KEY", "GIT_REPO_URL"):
         if not os.environ.get(var):
             raise HTTPException(status_code=503, detail=f"{var} not configured")
 
-    # 1. Verify Production version exists
     versions = client.search_model_versions(f"name='{_MODEL_NAME}'")
     production = [v for v in versions if v.current_stage == "Production"]
     if not production:
@@ -94,21 +101,14 @@ def trigger_deploy(
             detail=f"No Production version found for '{_MODEL_NAME}'. Run ci_gate first.",
         )
 
-    # 2. Provision Vast.ai instance (blocking — waits until "running")
     scaler = _build_scaler()
-    instance = scaler._create_vast_instance()   # {"id", "address", "ssh_port"}
-    host = instance["address"].split(":")[0]
+    instance = scaler._create_vast_instance(onstart=_build_serve_onstart())
 
-    # 3. SSH in and start vllm_server.py (fire-and-forget)
-    _ssh_start_vllm(host, instance["ssh_port"], instance["id"])
-
-    # 4. Register with scaler state + nginx + prometheus
     scaler.state.instances.append(instance)
     scaler._write_nginx_upstream()
     scaler._write_prometheus_targets()
     scaler.save_state()
 
-    # 5. Return
     return TriggerDeployResponse(
         instance_id=instance["id"],
         address=instance["address"],
