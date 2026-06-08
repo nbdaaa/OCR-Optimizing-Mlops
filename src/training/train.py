@@ -192,7 +192,12 @@ def train(
     import wandb
     from datasets import Dataset as HFDataset
     from peft import get_peft_model
-    from transformers import AutoModelForVision2Seq, AutoProcessor, Trainer
+    from transformers import AutoProcessor, Trainer
+    # transformers >= 4.49 renamed AutoModelForVision2Seq → AutoModelForImageTextToText
+    try:
+        from transformers import AutoModelForImageTextToText as AutoVLM
+    except ImportError:
+        from transformers import AutoModelForVision2Seq as AutoVLM
 
     cfg = config or TrainConfig()
 
@@ -209,7 +214,7 @@ def train(
     hf_dataset = HFDataset.from_pandas(df)
 
     processor = AutoProcessor.from_pretrained(cfg.base_model, token=hf_token)
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = AutoVLM.from_pretrained(
         cfg.base_model,
         torch_dtype=torch.bfloat16,
         device_map="auto",
