@@ -247,9 +247,11 @@ def train(
     model.print_trainable_parameters()
 
     print(f"[train] init W&B ...", flush=True)
+    # entity=None → wandb uses the API key's default entity (avoids
+    # "entity not found" when a hardcoded name doesn't match the account)
     wandb.init(
         project=os.environ.get("WANDB_PROJECT", "chandra-ocr"),
-        entity=os.environ.get("WANDB_ENTITY", "ducanhcttp"),
+        entity=os.environ.get("WANDB_ENTITY") or None,
         name=f"train-{data_version}{'_smoke' if smoke_test else ''}",
     )
 
