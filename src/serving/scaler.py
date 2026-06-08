@@ -165,9 +165,81 @@ class AutoScaler:
 
     # ── Vast.ai API ───────────────────────────────────────────────────────────
 
+    # GPUs we accept — all >= 24GB VRAM, common on Vast.ai
+    _ALLOWED_GPUS = ["RTX 3090", "RTX 4090", "RTX 5090"]
+
+    def _find_best_offer(self) -> str:
+        """
+        Search Vast.ai marketplace for a rentable offer on one of _ALLOWED_GPUS
+        and return its id.
+
+        Strategy: filter offers that meet the minimum requirements (allowed GPU,
+        disk, network up/down speed), then pick the CHEAPEST among them. Network
+        speed is a hard floor (configurable), not the sort key — the fastest
+        network usually costs more; we want the cheapest box with fast-enough
+        up/down for pulling the base model + pushing the adapter.
+
+        Tunable via env:
+            VAST_MIN_INET_MBPS  (default 100)  — floor for both up and down
+            VAST_MIN_DISK_GB    (default 40)
+            VAST_MAX_PRICE      (default none) — $/hr cap, optional
+
+        Returns the offer id as a string. Raises RuntimeError if none match.
+        """
+        min_inet  = float(os.environ.get("VAST_MIN_INET_MBPS", "100"))
+        min_disk  = int(os.environ.get("VAST_MIN_DISK_GB", "40"))
+        max_price = os.environ.get("VAST_MAX_PRICE")
+
+        query: dict = {
+            "rentable":   {"eq": True},
+            "num_gpus":   {"eq": 1},
+            "gpu_name":   {"in": self._ALLOWED_GPUS},
+            "disk_space": {"gte": min_disk},
+            "inet_down":  {"gte": min_inet},
+            "inet_up":    {"gte": min_inet},
+            "type":       "on-demand",
+            "order":      [["dph_total", "asc"]],
+        }
+
+        resp = requests.put(
+            f"{_VAST_BASE}/bundles/",
+            params={"api_key": self.config.vast_api_key},
+            json={"q": query},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        offers = resp.json().get("offers", [])
+
+        # Re-filter client-side (API query is best-effort) and sort by price
+        candidates = [
+            o for o in offers
+            if o.get("gpu_name") in self._ALLOWED_GPUS
+            and o.get("disk_space", 0) >= min_disk
+            and o.get("inet_down", 0) >= min_inet
+            and o.get("inet_up", 0) >= min_inet
+            and (max_price is None or o.get("dph_total", 1e9) <= float(max_price))
+        ]
+        if not candidates:
+            raise RuntimeError(
+                "No Vast.ai offer matched: "
+                f"GPU in {self._ALLOWED_GPUS}, >= {min_inet}Mbps up/down. "
+                "Loosen VAST_MIN_* env vars or try later."
+            )
+
+        best = min(candidates, key=lambda o: o["dph_total"])
+        print(
+            f"[scaler] picked offer {best['id']}: {best.get('gpu_name')} "
+            f"${best['dph_total']:.3f}/hr  "
+            f"down={best.get('inet_down')}Mbps up={best.get('inet_up')}Mbps",
+            flush=True,
+        )
+        return str(best["id"])
+
     def _create_vast_instance(self, image: str | None = None) -> dict:
         """
-        Call Vast.ai REST API to launch a new GPU instance from gpu_template_id.
+        Call Vast.ai REST API to launch a new GPU instance.
+        Uses gpu_template_id if set, otherwise auto-selects the cheapest offer
+        meeting the requirements via _find_best_offer().
         Polls until the instance is running, then returns
         {"id": <instance_id>, "address": "<host>:8000", "ssh_port": <port>}.
 
@@ -176,7 +248,8 @@ class AutoScaler:
                    (default); training passes its own PyTorch image.
         """
         img = image or os.environ.get("VLLM_DOCKER_IMAGE", "vllm/vllm-openai:latest")
-        url = f"{_VAST_BASE}/asks/{self.config.gpu_template_id}/"
+        offer_id = self.config.gpu_template_id or self._find_best_offer()
+        url = f"{_VAST_BASE}/asks/{offer_id}/"
         payload = {
             "client_id": "me",
             "image": img,
