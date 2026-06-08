@@ -280,7 +280,11 @@ class AutoScaler:
             json=payload,
             timeout=30,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Vast create failed {resp.status_code} for offer {offer_id}: "
+                f"{resp.text} | payload={payload}"
+            )
         result = resp.json()
         if not result.get("success"):
             raise RuntimeError(f"Vast.ai launch failed: {result}")
