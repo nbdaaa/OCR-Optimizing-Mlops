@@ -33,11 +33,13 @@ _STATUS_MAP = {
 
 _EXPERIMENT = "ocr-training"
 
-# Vars forwarded to the remote .env unchanged (same name + value)
+# Vars forwarded to the remote .env unchanged (same name + value).
+# WANDB_ENTITY intentionally NOT forwarded — let wandb resolve the API key's
+# default entity (a hardcoded name causes "entity not found").
 _FORWARD_AS_IS = [
     "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET_DATA",
     "HF_TOKEN", "HF_REPO_DATA",
-    "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY",
+    "WANDB_API_KEY", "WANDB_PROJECT",
 ]
 
 # Endpoint vars: the remote can't resolve docker network names (minio/mlflow),
