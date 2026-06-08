@@ -15,6 +15,7 @@ import boto3
 import mlflow
 import pandas as pd
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 from src.training.config import TrainConfig
 
@@ -42,7 +43,18 @@ def load_dataset_from_minio(
         )
     bucket = os.environ.get("MINIO_BUCKET_DATA", cfg.minio_bucket)
     resp = s3_client.get_object(Bucket=bucket, Key=f"{version}/dataset.parquet")
-    return pd.read_parquet(io.BytesIO(resp["Body"].read()))
+
+    total = int(resp.get("ContentLength", 0))
+    body = resp["Body"]
+    buf = io.BytesIO()
+    with tqdm(
+        total=total, unit="B", unit_scale=True, desc="  downloading parquet"
+    ) as pbar:
+        for chunk in iter(lambda: body.read(1024 * 1024), b""):
+            buf.write(chunk)
+            pbar.update(len(chunk))
+    buf.seek(0)
+    return pd.read_parquet(buf)
 
 
 # ── LoRA config ────────────────────────────────────────────────────────────────
