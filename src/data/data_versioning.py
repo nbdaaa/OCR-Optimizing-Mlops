@@ -23,6 +23,14 @@ from PIL import Image
 from tqdm import tqdm
 
 
+# ── Config ────────────────────────────────────────────────────────────────────
+
+# Longest image edge after resize. granite-docling processes images at limited
+# resolution, so storing full-res scans wastes RAM, disk and MinIO bandwidth.
+MAX_IMAGE_EDGE = int(os.environ.get("MAX_IMAGE_EDGE", "1024"))
+JPEG_QUALITY   = int(os.environ.get("JPEG_QUALITY", "85"))
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 def is_valid(sample: dict) -> bool:
@@ -66,6 +74,35 @@ def build_metadata(
         "offset": offset,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ── Resize ────────────────────────────────────────────────────────────────────
+
+def resize_sample(sample: dict) -> dict:
+    """
+    Downscale a sample's image so its longest edge <= MAX_IMAGE_EDGE and
+    re-encode it as JPEG (quality JPEG_QUALITY). Updates img_w/img_h in place.
+
+    This drastically reduces memory and storage: high-res scans (~300KB) shrink
+    to ~50-80KB. Images already within the limit are still re-encoded to JPEG
+    for a consistent, compact format.
+
+    Mutates and returns the same sample dict (originals freed by the caller's GC).
+    """
+    img = _to_pil(sample["image"])
+
+    w, h = img.size
+    longest = max(w, h)
+    if longest > MAX_IMAGE_EDGE:
+        scale = MAX_IMAGE_EDGE / longest
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+
+    sample["image"] = buf.getvalue()
+    sample["img_w"], sample["img_h"] = img.size
+    return sample
 
 
 # ── Deduplication ─────────────────────────────────────────────────────────────
@@ -366,16 +403,21 @@ def create_version(
             samples = samples[:max_samples]
         total = len(samples)
 
-    print(f"  [1/5] filtering invalid samples ({total:,} total) ...", flush=True)
+    print(f"  [1/6] filtering invalid samples ({total:,} total) ...", flush=True)
     samples = [s for s in samples if is_valid(s)]
     rejected_invalid = total - len(samples)
     print(f"        → {len(samples):,} valid  ({rejected_invalid:,} rejected)", flush=True)
 
-    print(f"  [2/5] exact dedup ...", flush=True)
+    print(f"  [2/6] resizing images (max edge {MAX_IMAGE_EDGE}px, JPEG q{JPEG_QUALITY}) ...", flush=True)
+    for i in tqdm(range(len(samples)), desc="        resizing", leave=False):
+        samples[i] = resize_sample(samples[i])
+    print(f"        → done", flush=True)
+
+    print(f"  [3/6] exact dedup ...", flush=True)
     samples, exact_stats = exact_dedup(samples)
     print(f"        → {len(samples):,} remain  ({exact_stats['exact_removed']} removed)", flush=True)
 
-    print(f"  [3/5] phash dedup ({len(samples):,} samples, O(n²)) ...", flush=True)
+    print(f"  [4/6] phash dedup ({len(samples):,} samples, O(n²)) ...", flush=True)
     samples, phash_stats = phash_dedup(samples)
     print(f"        → {len(samples):,} remain  ({phash_stats['phash_removed']} removed)", flush=True)
 
@@ -400,14 +442,14 @@ def create_version(
         parquet_path = os.path.join(tmp, "dataset.parquet")
         meta_path = os.path.join(tmp, "metadata.json")
 
-        print(f"  [4/5] writing parquet ({len(samples):,} rows, pyarrow) ...", flush=True)
+        print(f"  [5/6] writing parquet ({len(samples):,} rows, pyarrow) ...", flush=True)
         write_parquet(samples, parquet_path)
         size_mb = os.path.getsize(parquet_path) / 1024 / 1024
         print(f"        → {size_mb:.1f} MB", flush=True)
         with open(meta_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
-        print(f"  [5/5] uploading to MinIO ...", flush=True)
+        print(f"  [6/6] uploading to MinIO ...", flush=True)
         upload_to_minio(tmp, version)
         print(f"        logging to MLflow ...", flush=True)
         run_id = log_to_mlflow(version, metadata, meta_path)
