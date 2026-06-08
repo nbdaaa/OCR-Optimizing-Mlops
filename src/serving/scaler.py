@@ -301,7 +301,13 @@ class AutoScaler:
                 timeout=10,
             )
             status_resp.raise_for_status()
-            inst = status_resp.json().get("instances", [{}])[0]
+            # GET /instances/{id}/ returns instances as a single dict;
+            # GET /instances/ returns a list. Handle both.
+            data = status_resp.json().get("instances")
+            if isinstance(data, list):
+                inst = data[0] if data else {}
+            else:
+                inst = data or {}
             if inst.get("actual_status") == "running":
                 host = inst["public_ipaddr"]
                 ssh_port = str(inst.get("ssh_port", 22))
