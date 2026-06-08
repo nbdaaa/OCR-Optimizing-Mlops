@@ -249,7 +249,9 @@ class AutoScaler:
         Uses gpu_template_id if set, otherwise auto-selects the cheapest offer
         meeting the requirements via _find_best_offer().
         Polls until the instance is running, then returns
-        {"id": <instance_id>, "address": "<host>:8000", "ssh_port": <port>}.
+        {"id": <instance_id>, "address": "<host>:<mapped_port>", "ssh_port": <port>}.
+        Internal port 8000 is exposed at rent time via `-p 8000:8000`; Vast maps
+        it to a dynamic external port, read back from the instance's `ports` info.
 
         Args:
             image: Docker image for the instance. Serving uses the vLLM image
@@ -263,6 +265,8 @@ class AutoScaler:
             "image": img,
             "runtype": "ssh",
             "disk": 40,
+            # Expose the vLLM serving port; Vast assigns a dynamic external port.
+            "env": "-p 8000:8000",
         }
         resp = requests.put(
             url,
@@ -290,7 +294,15 @@ class AutoScaler:
             if inst.get("actual_status") == "running":
                 host = inst["public_ipaddr"]
                 ssh_port = str(inst.get("ssh_port", 22))
-                return {"id": instance_id, "address": f"{host}:8000", "ssh_port": ssh_port}
+                # Vast maps internal 8000 → a dynamic external port (in `ports`).
+                ports = inst.get("ports") or {}
+                mapping = ports.get("8000/tcp") or [{}]
+                ext_port = mapping[0].get("HostPort", "8000")
+                return {
+                    "id": instance_id,
+                    "address": f"{host}:{ext_port}",
+                    "ssh_port": ssh_port,
+                }
 
         raise TimeoutError(
             f"Instance {instance_id} did not reach 'running' within "
