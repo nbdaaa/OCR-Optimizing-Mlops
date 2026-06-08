@@ -25,10 +25,10 @@ from tqdm import tqdm
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# Longest image edge after resize. granite-docling processes images at limited
-# resolution, so storing full-res scans wastes RAM, disk and MinIO bandwidth.
-MAX_IMAGE_EDGE = int(os.environ.get("MAX_IMAGE_EDGE", "1024"))
-JPEG_QUALITY   = int(os.environ.get("JPEG_QUALITY", "85"))
+# Rows written per parquet row-group. Smaller batches cap peak memory during
+# writing (we never build the full arrow table at once), at the cost of slightly
+# less compression. Tuned for small-RAM VMs.
+PARQUET_BATCH_SIZE = int(os.environ.get("PARQUET_BATCH_SIZE", "200"))
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -74,35 +74,6 @@ def build_metadata(
         "offset": offset,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-
-
-# ── Resize ────────────────────────────────────────────────────────────────────
-
-def resize_sample(sample: dict) -> dict:
-    """
-    Downscale a sample's image so its longest edge <= MAX_IMAGE_EDGE and
-    re-encode it as JPEG (quality JPEG_QUALITY). Updates img_w/img_h in place.
-
-    This drastically reduces memory and storage: high-res scans (~300KB) shrink
-    to ~50-80KB. Images already within the limit are still re-encoded to JPEG
-    for a consistent, compact format.
-
-    Mutates and returns the same sample dict (originals freed by the caller's GC).
-    """
-    img = _to_pil(sample["image"])
-
-    w, h = img.size
-    longest = max(w, h)
-    if longest > MAX_IMAGE_EDGE:
-        scale = MAX_IMAGE_EDGE / longest
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-
-    sample["image"] = buf.getvalue()
-    sample["img_w"], sample["img_h"] = img.size
-    return sample
 
 
 # ── Deduplication ─────────────────────────────────────────────────────────────
@@ -265,46 +236,58 @@ def _image_to_bytes(img: Any) -> bytes | None:
     return buf.getvalue()
 
 
-def write_parquet(samples: list[dict], path: str) -> None:
+def _batch_to_table(batch: list[dict], keys: list[str]) -> pa.Table:
     """
-    Write samples to parquet via pyarrow directly (no pandas).
+    Build an arrow Table from one batch of samples.
 
     The 'image' column is declared as pa.binary() so pyarrow uses a fast
-    zero-inference path for the raw image bytes — this avoids the per-cell
-    object→binary type inference that makes pandas.to_parquet extremely slow
-    on binary blobs.
+    zero-inference path for the raw image bytes (and normalizes bytes/PIL/HF
+    dict to bytes). Other columns are inferred.
+    """
+    arrays = []
+    names = []
+    for k in keys:
+        col = [s.get(k) for s in batch]
+        if k == "image":
+            arrays.append(pa.array([_image_to_bytes(v) for v in col], type=pa.binary()))
+        else:
+            arrays.append(pa.array(col))
+        names.append(k)
+    return pa.Table.from_arrays(arrays, names=names)
 
-    Any non-image columns are inferred by pyarrow as usual.
+
+def write_parquet(samples: list[dict], path: str) -> None:
+    """
+    Write samples to parquet in row-group batches of PARQUET_BATCH_SIZE.
+
+    Writing batch-by-batch with pq.ParquetWriter caps peak memory: we only ever
+    materialize one small arrow table (~PARQUET_BATCH_SIZE rows) at a time
+    instead of the entire dataset's image bytes — critical on small-RAM VMs.
     """
     if not samples:
         pq.write_table(pa.table({}), path)
         return
 
-    # Column-orient the list of dicts (union of all keys)
     keys: list[str] = list(samples[0].keys())
-    columns = {k: [s.get(k) for s in samples] for k in keys}
-
-    arrays = []
-    names = []
-    for k in keys:
-        if k == "image":
-            # Normalize each image to raw bytes (handles bytes, PIL.Image, or
-            # HF {"bytes": ...} dict) so the binary fast-path always applies.
-            img_bytes = [
-                _image_to_bytes(v)
-                for v in tqdm(columns[k], desc="        normalizing images", leave=False)
-            ]
-            total_mb = sum(len(b) for b in img_bytes if b) / 1024 / 1024
-            print(f"        image bytes: {total_mb:.1f} MB raw", flush=True)
-            arrays.append(pa.array(img_bytes, type=pa.binary()))
-        else:
-            arrays.append(pa.array(columns[k]))
-        names.append(k)
-
-    print(f"        building arrow table ...", flush=True)
-    table = pa.Table.from_arrays(arrays, names=names)
-    print(f"        compressing + writing (zstd) ...", flush=True)
-    pq.write_table(table, path, compression="zstd")
+    writer = None
+    try:
+        n_batches = (len(samples) + PARQUET_BATCH_SIZE - 1) // PARQUET_BATCH_SIZE
+        for start in tqdm(
+            range(0, len(samples), PARQUET_BATCH_SIZE),
+            total=n_batches,
+            desc="        writing batches",
+            leave=False,
+        ):
+            batch = samples[start : start + PARQUET_BATCH_SIZE]
+            table = _batch_to_table(batch, keys)
+            if writer is None:
+                writer = pq.ParquetWriter(path, table.schema, compression="zstd")
+            else:
+                table = table.cast(writer.schema)
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
@@ -403,21 +386,16 @@ def create_version(
             samples = samples[:max_samples]
         total = len(samples)
 
-    print(f"  [1/6] filtering invalid samples ({total:,} total) ...", flush=True)
+    print(f"  [1/5] filtering invalid samples ({total:,} total) ...", flush=True)
     samples = [s for s in samples if is_valid(s)]
     rejected_invalid = total - len(samples)
     print(f"        → {len(samples):,} valid  ({rejected_invalid:,} rejected)", flush=True)
 
-    print(f"  [2/6] resizing images (max edge {MAX_IMAGE_EDGE}px, JPEG q{JPEG_QUALITY}) ...", flush=True)
-    for i in tqdm(range(len(samples)), desc="        resizing", leave=False):
-        samples[i] = resize_sample(samples[i])
-    print(f"        → done", flush=True)
-
-    print(f"  [3/6] exact dedup ...", flush=True)
+    print(f"  [2/5] exact dedup ...", flush=True)
     samples, exact_stats = exact_dedup(samples)
     print(f"        → {len(samples):,} remain  ({exact_stats['exact_removed']} removed)", flush=True)
 
-    print(f"  [4/6] phash dedup ({len(samples):,} samples, O(n²)) ...", flush=True)
+    print(f"  [3/5] phash dedup ({len(samples):,} samples, O(n²)) ...", flush=True)
     samples, phash_stats = phash_dedup(samples)
     print(f"        → {len(samples):,} remain  ({phash_stats['phash_removed']} removed)", flush=True)
 
@@ -442,14 +420,14 @@ def create_version(
         parquet_path = os.path.join(tmp, "dataset.parquet")
         meta_path = os.path.join(tmp, "metadata.json")
 
-        print(f"  [5/6] writing parquet ({len(samples):,} rows, pyarrow) ...", flush=True)
+        print(f"  [4/5] writing parquet ({len(samples):,} rows, pyarrow) ...", flush=True)
         write_parquet(samples, parquet_path)
         size_mb = os.path.getsize(parquet_path) / 1024 / 1024
         print(f"        → {size_mb:.1f} MB", flush=True)
         with open(meta_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
-        print(f"  [6/6] uploading to MinIO ...", flush=True)
+        print(f"  [5/5] uploading to MinIO ...", flush=True)
         upload_to_minio(tmp, version)
         print(f"        logging to MLflow ...", flush=True)
         run_id = log_to_mlflow(version, metadata, meta_path)
