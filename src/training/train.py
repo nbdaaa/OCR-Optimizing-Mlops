@@ -15,6 +15,7 @@ import boto3
 import mlflow
 import pandas as pd
 from dotenv import load_dotenv
+from PIL import Image
 from tqdm import tqdm
 
 from src.training.config import TrainConfig
@@ -26,6 +27,15 @@ load_dotenv()
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 _USER_PROMPT = "Convert this page to docling format."
+
+
+def _decode_image(img) -> Image.Image:
+    """Coerce a parquet image value (bytes / HF dict / PIL) to an RGB PIL.Image."""
+    if isinstance(img, dict):
+        img = img.get("bytes")
+    if isinstance(img, (bytes, bytearray)):
+        img = Image.open(io.BytesIO(img))
+    return img.convert("RGB")
 
 
 # ── Data ──────────────────────────────────────────────────────────────────────
@@ -147,16 +157,7 @@ class DataCollatorForOCR:
 
     def __call__(self, samples: list[dict]) -> dict:
         import torch
-        from PIL import Image
         from src.training.collator import apply_label_mask, find_boundary_idx
-
-        def to_pil(img):
-            # parquet stores images as raw bytes; processor needs PIL.Image
-            if isinstance(img, dict):
-                img = img.get("bytes")
-            if isinstance(img, (bytes, bytearray)):
-                img = Image.open(io.BytesIO(img))
-            return img.convert("RGB")
 
         texts, images = [], []
         for sample in samples:
@@ -175,7 +176,7 @@ class DataCollatorForOCR:
                     messages, tokenize=False, add_generation_prompt=False
                 )
             )
-            images.append([to_pil(sample["image"])])
+            images.append([_decode_image(sample["image"])])
 
         batch = self.processor(
             text=texts,
@@ -195,6 +196,61 @@ class DataCollatorForOCR:
 
         batch["labels"] = torch.tensor(labels, dtype=torch.long)
         return batch
+
+
+# ── CER evaluation (generate-based) ───────────────────────────────────────────
+
+def evaluate_cer(
+    model,
+    processor,
+    df: pd.DataFrame,
+    config: TrainConfig | None = None,
+    n_samples: int | None = None,
+    max_new_tokens: int | None = None,
+) -> float:
+    """
+    Compute mean CER on a subset of `df` by generating predictions and comparing
+    to ground-truth output_text (XML tags stripped on both sides).
+
+    Generation uses the KV cache (incremental) so it avoids the full-sequence
+    logits tensor that makes in-loop eval OOM. Runs on cfg.cer_eval_samples rows.
+    """
+    import torch
+    from src.training.evaluate import compute_batch_cer, strip_xml_tags
+
+    cfg = config or TrainConfig()
+    n = n_samples or cfg.cer_eval_samples
+    new_tokens = max_new_tokens or cfg.max_length
+    eval_df = df.head(n)
+
+    # generate() needs cache on and checkpointing off
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    model.config.use_cache = True
+    model.eval()
+
+    preds, gts = [], []
+    for _, row in tqdm(
+        eval_df.iterrows(), total=len(eval_df), desc="  CER eval", leave=False
+    ):
+        messages = [{
+            "role": "user",
+            "content": [{"type": "image"}, {"type": "text", "text": _USER_PROMPT}],
+        }]
+        text = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = processor(
+            text=[text], images=[[_decode_image(row["image"])]], return_tensors="pt"
+        ).to(model.device)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=new_tokens, do_sample=False)
+        gen_ids = out[0][inputs["input_ids"].shape[1]:]
+        pred = processor.tokenizer.decode(gen_ids, skip_special_tokens=True)
+        preds.append(strip_xml_tags(pred))
+        gts.append(strip_xml_tags(row["output_text"]))
+
+    return compute_batch_cer(preds, gts)
 
 
 # ── MLflow registration ───────────────────────────────────────────────────────
@@ -319,6 +375,17 @@ def train(
         model.save_pretrained(output_dir)
         processor.save_pretrained(output_dir)
         mlflow.log_artifacts(output_dir, artifact_path="adapter")
+
+        # Generate-based CER on a held-out subset → metric the CI gate reads.
+        # Smoke test: just 1 sample / few tokens to keep it fast.
+        print(f"[train] computing CER ...", flush=True)
+        cer = evaluate_cer(
+            model, processor, df, cfg,
+            n_samples=1 if smoke_test else None,
+            max_new_tokens=64 if smoke_test else None,
+        )
+        mlflow.log_metric("cer", cer)
+        print(f"[train] CER = {cer:.4f}", flush=True)
 
     wandb.finish()
     register_adapter(run_id, config=cfg)

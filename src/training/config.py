@@ -16,6 +16,9 @@ class TrainConfig:
     max_length: int = 4500
     minio_bucket: str = "ocr-data"
 
+    # ── Post-training CER eval (generate-based; for CI gate) ──────────────────
+    cer_eval_samples: int = 50
+
     # ── Training hyperparameters ──────────────────────────────────────────────
     learning_rate: float = 5e-5
     batch_size: int = 1
