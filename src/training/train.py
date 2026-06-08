@@ -122,7 +122,16 @@ class DataCollatorForOCR:
 
     def __call__(self, samples: list[dict]) -> dict:
         import torch
+        from PIL import Image
         from src.training.collator import apply_label_mask, find_boundary_idx
+
+        def to_pil(img):
+            # parquet stores images as raw bytes; processor needs PIL.Image
+            if isinstance(img, dict):
+                img = img.get("bytes")
+            if isinstance(img, (bytes, bytearray)):
+                img = Image.open(io.BytesIO(img))
+            return img.convert("RGB")
 
         texts, images = [], []
         for sample in samples:
@@ -141,7 +150,7 @@ class DataCollatorForOCR:
                     messages, tokenize=False, add_generation_prompt=False
                 )
             )
-            images.append([sample["image"]])
+            images.append([to_pil(sample["image"])])
 
         batch = self.processor(
             text=texts,

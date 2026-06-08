@@ -47,5 +47,7 @@ class TrainConfig:
             "epochs":        self.num_epochs,
             "lora_r":        self.lora_r,
             "lora_alpha":    self.lora_alpha,
-            "max_length":    self.max_length,
+            # named max_seq_length to avoid colliding with the transformers
+            # MLflow callback, which logs generation_config's "max_length"
+            "max_seq_length": self.max_length,
         }
