@@ -270,7 +270,8 @@ class AutoScaler:
             "runtype": "ssh",
             "disk": 40,
             # Expose the vLLM serving port; Vast assigns a dynamic external port.
-            "env": "-p 8000:8000",
+            # env must be a dict — port mapping is a key with a dummy "1" value.
+            "env": {"-p 8000:8000": "1"},
         }
         if onstart:
             payload["onstart"] = onstart
