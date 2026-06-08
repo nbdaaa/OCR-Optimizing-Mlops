@@ -98,6 +98,9 @@ def build_training_args(
         load_best_model_at_end=True,
         report_to=["mlflow", "wandb"],
         max_steps=1 if smoke_test else -1,
+        # Keep raw columns (image, output_text, ...) — the custom collator needs
+        # them; Trainer would otherwise strip non-forward-signature columns.
+        remove_unused_columns=False,
     )
 
 
