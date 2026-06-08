@@ -16,6 +16,8 @@ import boto3
 import imagehash
 import mlflow
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from datasets import load_dataset
 from PIL import Image
 from tqdm import tqdm
@@ -210,6 +212,57 @@ def get_next_offset(bucket: str) -> int:
     return total_consumed
 
 
+# ── Parquet writer ────────────────────────────────────────────────────────────
+
+def _image_to_bytes(img: Any) -> bytes | None:
+    """Coerce an image value (bytes, PIL.Image, or HF dict) to raw bytes."""
+    if img is None:
+        return None
+    if isinstance(img, bytes):
+        return img
+    if isinstance(img, dict):
+        return img.get("bytes")
+    # PIL.Image
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def write_parquet(samples: list[dict], path: str) -> None:
+    """
+    Write samples to parquet via pyarrow directly (no pandas).
+
+    The 'image' column is declared as pa.binary() so pyarrow uses a fast
+    zero-inference path for the raw image bytes — this avoids the per-cell
+    object→binary type inference that makes pandas.to_parquet extremely slow
+    on binary blobs.
+
+    Any non-image columns are inferred by pyarrow as usual.
+    """
+    if not samples:
+        pq.write_table(pa.table({}), path)
+        return
+
+    # Column-orient the list of dicts (union of all keys)
+    keys: list[str] = list(samples[0].keys())
+    columns = {k: [s.get(k) for s in samples] for k in keys}
+
+    arrays = []
+    names = []
+    for k in keys:
+        if k == "image":
+            # Normalize each image to raw bytes (handles bytes, PIL.Image, or
+            # HF {"bytes": ...} dict) so the binary fast-path always applies.
+            img_bytes = [_image_to_bytes(v) for v in columns[k]]
+            arrays.append(pa.array(img_bytes, type=pa.binary()))
+        else:
+            arrays.append(pa.array(columns[k]))
+        names.append(k)
+
+    table = pa.Table.from_arrays(arrays, names=names)
+    pq.write_table(table, path, compression="zstd")
+
+
 # ── Storage ───────────────────────────────────────────────────────────────────
 
 def upload_to_minio(local_dir: str, version: str) -> None:
@@ -330,10 +383,8 @@ def create_version(
         parquet_path = os.path.join(tmp, "dataset.parquet")
         meta_path = os.path.join(tmp, "metadata.json")
 
-        print(f"  [4/5] building DataFrame ({len(samples):,} rows) ...", flush=True)
-        df = pd.DataFrame(samples)
-        print(f"        writing parquet ...", flush=True)
-        df.to_parquet(parquet_path, index=False)
+        print(f"  [4/5] writing parquet ({len(samples):,} rows, pyarrow) ...", flush=True)
+        write_parquet(samples, parquet_path)
         size_mb = os.path.getsize(parquet_path) / 1024 / 1024
         print(f"        → {size_mb:.1f} MB", flush=True)
         with open(meta_path, "w") as f:
