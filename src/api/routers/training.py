@@ -27,22 +27,33 @@ _STATUS_MAP = {
 
 _EXPERIMENT = "ocr-training"
 
-# Env vars forwarded to the training instance's .env file
-_FORWARDED_VARS = [
-    "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET_DATA",
-    "MLFLOW_TRACKING_URI", "MLFLOW_S3_ENDPOINT_URL",
+# Vars forwarded to the remote .env unchanged (same name + value)
+_FORWARD_AS_IS = [
+    "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET_DATA",
     "HF_TOKEN", "HF_REPO_DATA",
     "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY",
 ]
 
+# Endpoint vars: the remote can't resolve docker network names (minio/mlflow),
+# so forward the PUBLIC_* value under the standard name the remote train.py reads.
+_FORWARD_PUBLIC = {
+    "MLFLOW_TRACKING_URI":    "PUBLIC_MLFLOW_TRACKING_URI",
+    "MLFLOW_S3_ENDPOINT_URL": "PUBLIC_MINIO_ENDPOINT",
+    "MINIO_ENDPOINT":         "PUBLIC_MINIO_ENDPOINT",
+}
+
 
 def _build_env_block() -> str:
-    """Collect relevant env vars to write as .env on the remote instance."""
-    return "\n".join(
+    """Collect env vars to write as .env on the remote instance (public endpoints)."""
+    lines = [
         f"{var}={os.environ[var]}"
-        for var in _FORWARDED_VARS
+        for var in _FORWARD_AS_IS
         if os.environ.get(var)
-    )
+    ]
+    for remote_name, src in _FORWARD_PUBLIC.items():
+        if os.environ.get(src):
+            lines.append(f"{remote_name}={os.environ[src]}")
+    return "\n".join(lines)
 
 
 def _provision_and_train(run_id: str, data_version: str) -> None:

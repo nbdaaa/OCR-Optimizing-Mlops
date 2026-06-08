@@ -99,6 +99,7 @@ services:
       minio:
         condition: service_healthy
     environment:
+      # ── Container's own access (internal docker network names) ──
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       MINIO_ENDPOINT: http://minio:9000
@@ -107,9 +108,25 @@ services:
       MINIO_BUCKET_DATA: ocr-data
       HF_TOKEN: ${HF_TOKEN}
       HF_REPO_DATA: ${HF_REPO_DATA}
-      HF_REPO_ADAPTER: ${HF_REPO_ADAPTER}
-      VAST_API_KEY: ${VAST_API_KEY}
       WANDB_API_KEY: ${WANDB_API_KEY}
+      WANDB_PROJECT: ${WANDB_PROJECT}
+      WANDB_ENTITY: ${WANDB_ENTITY}
+      # ── Public endpoints forwarded to remote Vast.ai instances ──
+      # (remote can't resolve docker network names like "minio")
+      PUBLIC_MLFLOW_TRACKING_URI: ${PUBLIC_MLFLOW_TRACKING_URI}
+      PUBLIC_MINIO_ENDPOINT: ${PUBLIC_MINIO_ENDPOINT}
+      # ── Vast.ai orchestration (training/deploy triggers) ──
+      VAST_API_KEY: ${VAST_API_KEY}
+      GPU_TEMPLATE_ID: ${GPU_TEMPLATE_ID}
+      GPU_TRAIN_TEMPLATE_ID: ${GPU_TRAIN_TEMPLATE_ID}
+      TRAIN_DOCKER_IMAGE: ${TRAIN_DOCKER_IMAGE}
+      GIT_REPO_URL: ${GIT_REPO_URL}
+      VAST_TRAIN_USER: root
+      VAST_TRAIN_KEY: /root/.ssh/id_rsa
+      REMOTE_WORK_DIR: ${REMOTE_WORK_DIR}
+    volumes:
+      # SSH key to reach Vast.ai instances (pubkey must be registered on Vast)
+      - ${VAST_SSH_KEY_HOST:-~/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
     ports:
       - "8000:8000"
     networks:
