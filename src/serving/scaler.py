@@ -165,17 +165,22 @@ class AutoScaler:
 
     # ── Vast.ai API ───────────────────────────────────────────────────────────
 
-    def _create_vast_instance(self) -> dict:
+    def _create_vast_instance(self, image: str | None = None) -> dict:
         """
         Call Vast.ai REST API to launch a new GPU instance from gpu_template_id.
         Polls until the instance is running, then returns
-        {"id": <instance_id>, "address": "<host>:8000"}.
+        {"id": <instance_id>, "address": "<host>:8000", "ssh_port": <port>}.
+
+        Args:
+            image: Docker image for the instance. Serving uses the vLLM image
+                   (default); training passes its own PyTorch image.
         """
+        img = image or os.environ.get("VLLM_DOCKER_IMAGE", "vllm/vllm-openai:latest")
         url = f"{_VAST_BASE}/asks/{self.config.gpu_template_id}/"
         payload = {
             "client_id": "me",
-            "image": os.environ.get("VLLM_DOCKER_IMAGE", "vllm/vllm-openai:latest"),
-            "runtype": "ssh_direc tcp",
+            "image": img,
+            "runtype": "ssh",
             "disk": 40,
         }
         resp = requests.put(

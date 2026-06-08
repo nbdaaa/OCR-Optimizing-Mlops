@@ -62,7 +62,10 @@ def _provision_and_train(run_id: str, data_version: str) -> None:
         nginx_upstream_conf="",   # unused for training
         state_file="",            # unused for training
     )
-    instance = AutoScaler(cfg)._create_vast_instance()
+    train_image = os.environ.get(
+        "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel"
+    )
+    instance = AutoScaler(cfg)._create_vast_instance(image=train_image)
     host     = instance["address"].split(":")[0]
     ssh_port = instance["ssh_port"]
 
