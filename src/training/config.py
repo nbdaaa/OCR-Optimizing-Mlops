@@ -18,8 +18,8 @@ class TrainConfig:
 
     # ── Training hyperparameters ──────────────────────────────────────────────
     learning_rate: float = 5e-5
-    batch_size: int = 2
-    grad_accum: int = 8
+    batch_size: int = 1
+    grad_accum: int = 16
     num_epochs: int = 10
     warmup_ratio: float = 0.05
     weight_decay: float = 0.01

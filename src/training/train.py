@@ -22,6 +22,9 @@ from src.training.config import TrainConfig
 # Load .env so MLFLOW_TRACKING_URI / MINIO_* / HF_TOKEN / WANDB_* are available
 load_dotenv()
 
+# Reduce CUDA fragmentation OOM on long sequences
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 _USER_PROMPT = "Convert this page to docling format."
 
 
@@ -101,6 +104,10 @@ def build_training_args(
         # Keep raw columns (image, output_text, ...) — the custom collator needs
         # them; Trainer would otherwise strip non-forward-signature columns.
         remove_unused_columns=False,
+        # Trade compute for memory — long (6000-token) sequences with image
+        # tokens blow up activation memory on a 24GB card without this.
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
 
 
@@ -256,6 +263,8 @@ def train(
     for param in model.parameters():
         param.requires_grad = False
     model = get_peft_model(model, get_lora_config(cfg))
+    # Required for gradient checkpointing to flow grads through a frozen base
+    model.enable_input_require_grads()
     model.print_trainable_parameters()
 
     print(f"[train] init W&B ...", flush=True)
