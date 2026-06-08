@@ -189,6 +189,13 @@ class AutoScaler:
         min_inet  = float(os.environ.get("VAST_MIN_INET_MBPS", "100"))
         min_disk  = int(os.environ.get("VAST_MIN_DISK_GB", "40"))
         max_price = os.environ.get("VAST_MAX_PRICE")
+        # Exclude countries with throttled/blocked international links (e.g. CN
+        # behind the Great Firewall → slow transfers to our GCP VM + no GitHub).
+        exclude = {
+            c.strip().upper()
+            for c in os.environ.get("VAST_EXCLUDE_COUNTRIES", "CN").split(",")
+            if c.strip()
+        }
 
         query: dict = {
             "rentable":   {"eq": True},
@@ -218,12 +225,13 @@ class AutoScaler:
             and o.get("inet_down", 0) >= min_inet
             and o.get("inet_up", 0) >= min_inet
             and (max_price is None or o.get("dph_total", 1e9) <= float(max_price))
+            and (o.get("geolocation") or "").upper()[-2:] not in exclude
         ]
         if not candidates:
             raise RuntimeError(
                 "No Vast.ai offer matched: "
-                f"GPU in {self._ALLOWED_GPUS}, >= {min_inet}Mbps up/down. "
-                "Loosen VAST_MIN_* env vars or try later."
+                f"GPU in {self._ALLOWED_GPUS}, >= {min_inet}Mbps up/down, "
+                f"excluding {sorted(exclude)}. Loosen VAST_* env vars or try later."
             )
 
         best = min(candidates, key=lambda o: o["dph_total"])
