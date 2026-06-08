@@ -14,8 +14,12 @@ import os
 import boto3
 import mlflow
 import pandas as pd
+from dotenv import load_dotenv
 
 from src.training.config import TrainConfig
+
+# Load .env so MLFLOW_TRACKING_URI / MINIO_* / HF_TOKEN / WANDB_* are available
+load_dotenv()
 
 _USER_PROMPT = "Convert this page to docling format."
 
