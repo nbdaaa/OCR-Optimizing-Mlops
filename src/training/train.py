@@ -380,11 +380,25 @@ def train(
         processor.save_pretrained(output_dir)
         mlflow.log_artifacts(output_dir, artifact_path="adapter")
 
-        # Generate-based CER on a held-out subset → metric the CI gate reads.
-        # Smoke test: just 1 sample / few tokens to keep it fast.
+        # Generate-based CER on the fixed held-out benchmark → metric the CI
+        # gate reads. Evaluating on a separate benchmark (not train data) avoids
+        # leakage and makes cross-version regression comparison fair.
+        # Smoke test stays on train df (1 sample) to keep it fast.
+        if smoke_test:
+            bench_df = df
+        else:
+            bench_version = os.environ.get("BENCHMARK_VERSION", "benchmark")
+            try:
+                bench_df = load_dataset_from_minio(bench_version, config=cfg)
+                print(f"[train] CER benchmark: '{bench_version}' ({len(bench_df)} samples)", flush=True)
+            except Exception as exc:
+                bench_df = df
+                print(f"[train] WARNING benchmark '{bench_version}' not found ({exc}); "
+                      f"CER on TRAIN data (biased)", flush=True)
+
         print(f"[train] computing CER ...", flush=True)
         cer = evaluate_cer(
-            model, processor, df, cfg,
+            model, processor, bench_df, cfg,
             n_samples=1 if smoke_test else None,
             max_new_tokens=64 if smoke_test else None,
         )
