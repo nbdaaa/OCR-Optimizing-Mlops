@@ -28,7 +28,7 @@ class TrainConfig:
     learning_rate: float = 5e-5
     batch_size: int = 4      # 48GB VRAM (RTX 6000 Ada) — was 1 on 24GB
     grad_accum: int = 4      # effective batch stays 16
-    num_epochs: int = 10
+    num_epochs: int = 20
     warmup_ratio: float = 0.05
     weight_decay: float = 0.01
 
