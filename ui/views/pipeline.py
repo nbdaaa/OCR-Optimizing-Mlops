@@ -116,31 +116,28 @@ with tab_train:
                 st.json(status["metrics"])
 
             st.subheader("Live logs")
+            st.caption("🔴 Tự động stream qua SSH, refresh mỗi 2s.")
             ssh_host, ssh_port = status.get("ssh_host"), status.get("ssh_port")
             if ssh_host and ssh_port:
-                stream = st.toggle("🔴 Stream live (SSH, poll mỗi 2s)", key="stream_logs")
                 st.session_state.setdefault("live_log_cache", "")
                 # Fixed-height, independently scrollable box (own scrollbar,
                 # không dùng chung scroll trang).
-                log_box = st.container(height=420)
-                ph = log_box.empty()
+                ph = st.container(height=420).empty()
                 # Render cached content first so the box never blanks during the
-                # ~1s SSH fetch (avoids the disappear/reappear flicker on rerun).
+                # ~1s SSH fetch (avoids disappear/reappear flicker on rerun).
                 if st.session_state.live_log_cache:
                     ph.code(st.session_state.live_log_cache)
                 ok, text = _ssh_tail(ssh_host, ssh_port)
                 if ok:
                     st.session_state.live_log_cache = text
                     ph.code(text or "(empty)")
-                elif stream:
-                    ph.error(f"SSH: {text}")
                 else:
-                    ph.warning(f"SSH chưa kết nối được: {text}")
-                if stream and ok:
-                    time.sleep(2)
-                    st.rerun()
+                    ph.warning(f"SSH chưa kết nối được (đang thử lại): {text}")
+                # Auto-loop: keep polling (retries until the instance is reachable)
+                time.sleep(2)
+                st.rerun()
             else:
-                st.caption("Instance chưa provisioned xong — log sẽ stream được khi sẵn sàng.")
+                st.caption("Instance chưa provisioned xong — log sẽ stream khi sẵn sàng.")
 
         with st.expander("Snapshot logs (qua Vast API, ~1 phút lag)"):
             tail = st.slider("tail lines", 50, 1000, 200, step=50)
