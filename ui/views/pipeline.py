@@ -7,12 +7,34 @@ Uses a segmented_control (not st.tabs) to pick the section so ONLY the selected
 section's code runs. st.tabs renders every tab's code each run, which would make
 the Training auto-stream loop rerun the whole page even while viewing Data/CI-CD.
 """
+import re
 import subprocess
 import time
 
 import streamlit as st
 
 from api import api_get, api_post
+
+_PROG_RE = re.compile(r"\d+%\|")  # tqdm progress-bar marker
+
+
+def _clean_log(text: str) -> str:
+    """
+    Collapse tqdm progress spam: tqdm updates a bar with \\r, but in a captured
+    (non-tty) log each update becomes a new line → hundreds of near-duplicate
+    lines. Keep only the latest of any run of consecutive progress lines so the
+    box shows one tidy, updating bar instead of a flood.
+    """
+    out: list[str] = []
+    for raw in text.replace("\r", "\n").split("\n"):
+        ln = raw.rstrip()
+        if not ln:
+            continue
+        if _PROG_RE.search(ln) and out and _PROG_RE.search(out[-1]):
+            out[-1] = ln          # replace previous progress line with newest
+        else:
+            out.append(ln)
+    return "\n".join(out)
 
 
 def _ssh_tail(host: str, port: str, lines: int = 400) -> tuple[bool, str]:
@@ -134,7 +156,7 @@ elif section == _TRAIN:
                 while True:
                     ok_log, text = _ssh_tail(ssh_host, ssh_port)
                     if ok_log:
-                        ph.code(text or "(empty)")
+                        ph.code(_clean_log(text) or "(empty)")
                     else:
                         ph.warning(f"SSH chưa kết nối được (đang thử lại): {text}")
                     if not running:
