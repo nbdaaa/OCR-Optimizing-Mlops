@@ -1,13 +1,11 @@
-# ── Serving deps — install on the vLLM GPU instance only ─────────────────────
-# Standalone (not -r requirements.txt) so vLLM controls its own torch /
-# transformers / numpy versions without fighting the API pins.
-# vllm_server.py only needs the MLflow client (to fetch the Production adapter)
-# + boto3 for the MinIO-backed artifact store.
+# ── Serving deps — installed on the vLLM GPU instance only ───────────────────
+# The instance uses the vllm/vllm-openai image, so vLLM (+ torch/transformers)
+# is ALREADY present — do NOT reinstall it here (slow + risks version conflict).
+# We only add the lightweight bits vllm_server.py needs to fetch the adapter:
 #
-# mlflow-skinny (not full mlflow): the full package drags in matplotlib<4 /
-# flask / scikit-learn, which backtrack-conflict with vLLM's modern pins. The
-# skinny client still has MlflowClient + download_artifacts — all we need here.
-vllm>=0.6.2
+# mlflow-skinny (not full mlflow): the full package drags in matplotlib/flask/
+# scikit-learn which backtrack-conflict with the image's pins. The skinny client
+# still has MlflowClient + download_artifacts — all we need here.
 mlflow-skinny==2.13.0
 boto3>=1.34.0
 python-dotenv>=1.0.0

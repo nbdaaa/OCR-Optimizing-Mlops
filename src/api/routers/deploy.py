@@ -103,11 +103,18 @@ def trigger_deploy(
 
     scaler = _build_scaler()
     instance = scaler._create_vast_instance(onstart=_build_serve_onstart())
-
     scaler.state.instances.append(instance)
-    scaler._write_nginx_upstream()
-    scaler._write_prometheus_targets()
     scaler.save_state()
+
+    # Nginx upstream + Prometheus targets registration is part of the full
+    # autoscale wiring (needs the config files + docker socket mounted into this
+    # container). Best-effort for now so single-instance serving works; the
+    # instance address is returned and can be hit directly until the LB is wired.
+    try:
+        scaler._write_nginx_upstream()
+        scaler._write_prometheus_targets()
+    except Exception:  # noqa: BLE001 — LB wiring comes with the autoscale phase
+        pass
 
     return TriggerDeployResponse(
         instance_id=instance["id"],
