@@ -17,8 +17,10 @@ import requests
 
 _VAST_BASE = "https://console.vast.ai/api/v0"
 
-# How long to poll for a new Vast.ai instance to become "running"
-_INSTANCE_READY_TIMEOUT_S = 300
+# How long to poll for a new Vast.ai instance to become "running".
+# The vLLM image is several GB → first pull on a fresh host can exceed 5 min,
+# so default 15 min. Configurable via VAST_READY_TIMEOUT_S.
+_INSTANCE_READY_TIMEOUT_S = int(os.environ.get("VAST_READY_TIMEOUT_S", "900"))
 _INSTANCE_POLL_INTERVAL_S = 10
 
 
