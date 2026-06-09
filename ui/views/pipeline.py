@@ -122,26 +122,26 @@ elif section == _TRAIN:
                 st.json(status["metrics"])
 
             st.subheader("Live logs")
-            st.caption("🔴 Tự động stream qua SSH, refresh mỗi 2s (chỉ khi đang ở mục Training).")
             ssh_host, ssh_port = status.get("ssh_host"), status.get("ssh_port")
             if ssh_host and ssh_port:
-                st.session_state.setdefault("live_log_cache", "")
+                running = status.get("status") == "running"
+                st.caption("🔴 Live (cập nhật tại chỗ mỗi 2s, không nhấp nháy)."
+                           if running else "Job đã kết thúc — log cố định.")
+                # Placeholder created ONCE; the loop only updates its content
+                # in-place (no st.rerun → no DOM rebuild → no flicker). Any widget
+                # interaction (section/sidebar/nav) interrupts this loop.
                 ph = st.container(height=420).empty()
-                if st.session_state.live_log_cache:
-                    ph.code(st.session_state.live_log_cache)
-                ok_log, text = _ssh_tail(ssh_host, ssh_port)
-                if ok_log:
-                    st.session_state.live_log_cache = text
-                    ph.code(text or "(empty)")
-                else:
-                    ph.warning(f"SSH chưa kết nối được (đang thử lại): {text}")
-                # Auto-loop only while running AND while this section is selected,
-                # so navigating to Data/CI-CD (or another page) stops the rerun.
-                if status.get("status") == "running":
+                while True:
+                    ok_log, text = _ssh_tail(ssh_host, ssh_port)
+                    if ok_log:
+                        ph.code(text or "(empty)")
+                    else:
+                        ph.warning(f"SSH chưa kết nối được (đang thử lại): {text}")
+                    if not running:
+                        break
                     time.sleep(2)
-                    st.rerun()
-                else:
-                    st.caption("Job đã kết thúc — log cố định.")
+                    ok_s, s2 = api_get(f"/training/{job_id}/status")
+                    running = ok_s and s2.get("status") == "running"
             else:
                 st.caption("Instance chưa provisioned xong — log sẽ stream khi sẵn sàng.")
 
