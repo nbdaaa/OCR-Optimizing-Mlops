@@ -2,6 +2,10 @@
 Pipeline — the actions no existing tool provides (trigger data versioning,
 training, CI gate). Viewing/inspection lives in MLflow / MinIO / Grafana / W&B
 (see the Links page).
+
+Uses a segmented_control (not st.tabs) to pick the section so ONLY the selected
+section's code runs. st.tabs renders every tab's code each run, which would make
+the Training auto-stream loop rerun the whole page even while viewing Data/CI-CD.
 """
 import subprocess
 import time
@@ -25,14 +29,18 @@ def _ssh_tail(host: str, port: str, lines: int = 400) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
 
+
 st.title("🎛️ Pipeline Actions")
 
-tab_data, tab_train, tab_gate = st.tabs(["🗂️ Data", "🏋️ Training", "✅ CI/CD Gate"])
+_DATA, _TRAIN, _GATE = "🗂️ Data", "🏋️ Training", "✅ CI/CD Gate"
+section = st.segmented_control(
+    "Section", [_DATA, _TRAIN, _GATE], default=_TRAIN, label_visibility="collapsed"
+)
 
 # ── Data: create a version ────────────────────────────────────────────────────
-with tab_data:
+if section == _DATA:
     st.subheader("Create a data version")
-    st.caption("Browse existing versions in the MinIO console (see Links).")
+    st.caption("Duyệt các version đã có ở MinIO console (xem trang Links).")
     with st.form("create_version"):
         version = st.text_input("Version name", placeholder="v1")
         max_samples = st.number_input("Max samples (empty = all)", min_value=1, value=None, step=100)
@@ -51,8 +59,8 @@ with tab_data:
             else:
                 st.error(res)
 
-# ── Training: trigger + track ────────────────────────────────────────────────
-with tab_train:
+# ── Training: trigger + track + live logs ─────────────────────────────────────
+elif section == _TRAIN:
     st.session_state.setdefault("training_jobs", [])
 
     ok_d, data = api_get("/data/versions")
@@ -99,8 +107,6 @@ with tab_train:
     ) or st.text_input("…or paste a job_id")
 
     if job_id:
-        if st.button("🔄 Refresh"):
-            st.rerun()
         ok, status = api_get(f"/training/{job_id}/status")
         if not ok:
             st.error(status)
@@ -116,30 +122,26 @@ with tab_train:
                 st.json(status["metrics"])
 
             st.subheader("Live logs")
-            st.caption("🔴 Tự động stream qua SSH, refresh mỗi 2s.")
+            st.caption("🔴 Tự động stream qua SSH, refresh mỗi 2s (chỉ khi đang ở mục Training).")
             ssh_host, ssh_port = status.get("ssh_host"), status.get("ssh_port")
             if ssh_host and ssh_port:
                 st.session_state.setdefault("live_log_cache", "")
-                # Fixed-height, independently scrollable box (own scrollbar,
-                # không dùng chung scroll trang).
                 ph = st.container(height=420).empty()
-                # Render cached content first so the box never blanks during the
-                # ~1s SSH fetch (avoids disappear/reappear flicker on rerun).
                 if st.session_state.live_log_cache:
                     ph.code(st.session_state.live_log_cache)
-                ok, text = _ssh_tail(ssh_host, ssh_port)
-                if ok:
+                ok_log, text = _ssh_tail(ssh_host, ssh_port)
+                if ok_log:
                     st.session_state.live_log_cache = text
                     ph.code(text or "(empty)")
                 else:
                     ph.warning(f"SSH chưa kết nối được (đang thử lại): {text}")
-                # Auto-loop only while the job is still running, so the page stops
-                # refreshing once training completes/fails (no perpetual rerun).
+                # Auto-loop only while running AND while this section is selected,
+                # so navigating to Data/CI-CD (or another page) stops the rerun.
                 if status.get("status") == "running":
                     time.sleep(2)
                     st.rerun()
                 else:
-                    st.caption("Job đã kết thúc — log cố định (không refresh nữa).")
+                    st.caption("Job đã kết thúc — log cố định.")
             else:
                 st.caption("Instance chưa provisioned xong — log sẽ stream khi sẵn sàng.")
 
@@ -154,7 +156,7 @@ with tab_train:
                     st.error(logs)
 
 # ── CI/CD gate ────────────────────────────────────────────────────────────────
-with tab_gate:
+elif section == _GATE:
     st.subheader("Run CI/CD gate")
     st.caption("Reads Staging CER, compares to threshold + Production, transitions stage.")
     with st.form("run_gate"):
