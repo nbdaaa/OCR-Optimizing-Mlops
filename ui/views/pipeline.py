@@ -19,7 +19,7 @@ def _ssh_tail(host: str, port: str, lines: int = 400) -> tuple[bool, str]:
              "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
              "-o", "ConnectTimeout=8",
              f"root@{host}", f"tail -n {lines} /var/log/onstart.log"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=15,
         )
         return (True, out.stdout) if out.returncode == 0 else (False, out.stderr.strip() or "ssh failed")
     except Exception as exc:  # noqa: BLE001
