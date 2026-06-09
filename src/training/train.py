@@ -289,6 +289,27 @@ def register_adapter(
     return version.version
 
 
+# ── Continual warm-start ──────────────────────────────────────────────────────
+
+def resolve_warmstart_version(mlflow_client, model_name: str, init_version: str | None):
+    """
+    Pick the registered model version to warm-start (continual training) from.
+
+    init_version given  → that exact version (raises if missing).
+    init_version None   → the latest version (highest version number).
+    No versions at all  → None (caller starts a fresh LoRA from base).
+    """
+    versions = mlflow_client.search_model_versions(f"name='{model_name}'")
+    if not versions:
+        return None
+    if init_version:
+        match = next((v for v in versions if str(v.version) == str(init_version)), None)
+        if match is None:
+            raise RuntimeError(f"Model '{model_name}' has no version {init_version}")
+        return match
+    return max(versions, key=lambda v: int(v.version))
+
+
 # ── Main training pipeline ────────────────────────────────────────────────────
 
 def train(
@@ -298,11 +319,13 @@ def train(
     config: TrainConfig | None = None,
     run_id: str | None = None,
     resume_from_checkpoint: bool = False,
+    init_adapter_version: str | None = None,
 ) -> str:
     """
-    Full LoRA fine-tune pipeline:
+    Full LoRA fine-tune pipeline (continual):
       1. Pull dataset.parquet from MinIO
-      2. Load ibm-granite/granite-docling-258M + freeze base + apply LoRA
+      2. Load base + warm-start LoRA from the prior model version (latest, or
+         init_adapter_version); fresh LoRA only if no version exists yet
       3. Train with HF Trainer → log to MLflow + W&B
       4. mlflow.log_artifacts(output_dir, "adapter") → MinIO mlflow-artifacts
       5. register_adapter → Model Registry Staging
@@ -311,7 +334,7 @@ def train(
     import torch
     import wandb
     from datasets import Dataset as HFDataset
-    from peft import get_peft_model
+    from peft import PeftModel, get_peft_model
     from transformers import AutoProcessor, Trainer
     # transformers >= 4.49 renamed AutoModelForVision2Seq → AutoModelForImageTextToText
     try:
@@ -344,10 +367,23 @@ def train(
         device_map="auto",
         token=hf_token,
     )
-    print(f"[train] freezing base + applying LoRA ...", flush=True)
     for param in model.parameters():
         param.requires_grad = False
-    model = get_peft_model(model, get_lora_config(cfg))
+
+    # Continual: warm-start from a prior adapter version (latest by default),
+    # else fresh LoRA from base for the very first training.
+    prev = resolve_warmstart_version(mlflow.MlflowClient(), cfg.model_name, init_adapter_version)
+    if prev is not None:
+        adapter_dst = os.path.join(output_dir, "_warmstart")
+        os.makedirs(adapter_dst, exist_ok=True)
+        local = mlflow.MlflowClient().download_artifacts(prev.run_id, "adapter", adapter_dst)
+        print(f"[train] continual warm-start from model version {prev.version} "
+              f"(run {prev.run_id[:8]})", flush=True)
+        model = PeftModel.from_pretrained(model, local, is_trainable=True)
+    else:
+        print(f"[train] no prior adapter — fresh LoRA from base", flush=True)
+        model = get_peft_model(model, get_lora_config(cfg))
+
     # Required for gradient checkpointing to flow grads through a frozen base
     model.enable_input_require_grads()
     model.print_trainable_parameters()
@@ -428,6 +464,10 @@ if __name__ == "__main__":
         "--resume", action="store_true",
         help="Resume training from the latest checkpoint in --output-dir",
     )
+    parser.add_argument(
+        "--init-adapter-version", default=None,
+        help="Continual: warm-start from this model version (default: latest)",
+    )
     args = parser.parse_args()
     print(train(
         args.data_version,
@@ -435,4 +475,5 @@ if __name__ == "__main__":
         args.smoke_test,
         run_id=args.run_id,
         resume_from_checkpoint=args.resume,
+        init_adapter_version=args.init_adapter_version,
     ))

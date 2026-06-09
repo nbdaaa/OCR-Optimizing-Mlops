@@ -64,10 +64,13 @@ def _build_env_block() -> str:
     return "\n".join(lines)
 
 
-def _build_onstart(data_version: str, run_id: str, env_block: str) -> str:
+def _build_onstart(
+    data_version: str, run_id: str, env_block: str, init_adapter_version: str | None
+) -> str:
     """Bootstrap script the training instance runs on boot."""
     work_dir = os.environ.get("REMOTE_WORK_DIR", "/workspace/OCR-Optimizing-Mlops")
     git_repo = os.environ["GIT_REPO_URL"]
+    init_arg = f" --init-adapter-version {init_adapter_version}" if init_adapter_version else ""
     return f"""#!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -79,11 +82,13 @@ pip install -q -r requirements-train.txt
 cat > .env <<'ENVEOF'
 {env_block}
 ENVEOF
-python -m src.training.train --data-version {data_version} --run-id {run_id}
+python -m src.training.train --data-version {data_version} --run-id {run_id}{init_arg}
 """
 
 
-def _provision_and_train(run_id: str, data_version: str) -> None:
+def _provision_and_train(
+    run_id: str, data_version: str, init_adapter_version: str | None
+) -> None:
     """
     Background task: provision a Vast.ai GPU instance whose onstart script
     clones the repo, installs deps, and runs train.py with the pre-created
@@ -101,7 +106,7 @@ def _provision_and_train(run_id: str, data_version: str) -> None:
     train_image = os.environ.get(
         "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel"
     )
-    onstart = _build_onstart(data_version, run_id, _build_env_block())
+    onstart = _build_onstart(data_version, run_id, _build_env_block(), init_adapter_version)
 
     try:
         instance = AutoScaler(cfg)._create_vast_instance(image=train_image, onstart=onstart)
@@ -139,7 +144,9 @@ def trigger_training(
     )
     run_id = run.info.run_id
 
-    background_tasks.add_task(_provision_and_train, run_id, request.data_version)
+    background_tasks.add_task(
+        _provision_and_train, run_id, request.data_version, request.init_adapter_version
+    )
     return TriggerTrainingResponse(job_id=run_id)
 
 

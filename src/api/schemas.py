@@ -38,6 +38,7 @@ class VersionListResponse(BaseModel):
 
 class TriggerTrainingRequest(BaseModel):
     data_version: str
+    init_adapter_version: str | None = None   # continual warm-start; None = latest
 
 
 class TriggerTrainingResponse(BaseModel):
