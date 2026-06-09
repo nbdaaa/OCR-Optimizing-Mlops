@@ -4,7 +4,7 @@ Pydantic request/response schemas for all API endpoints.
 from __future__ import annotations
 
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ── Data versioning ───────────────────────────────────────────────────────────
@@ -17,12 +17,16 @@ class CreateVersionRequest(BaseModel):
 class VersionInfo(BaseModel):
     version: str
     count: int
-    hf_repo: str
-    split: str
-    created_at: str
-    filter_stats: dict[str, Any]
+    # Optional so the endpoint tolerates minimal metadata (e.g. the benchmark
+    # set, whose metadata.json only has version/count/source_version/note).
+    hf_repo: str | None = None
+    split: str | None = None
+    created_at: str | None = None
+    filter_stats: dict[str, Any] = Field(default_factory=dict)
     offset: int = 0
     mlflow_run_id: str | None = None
+    source_version: str | None = None
+    note: str | None = None
 
 
 class CreateVersionResponse(BaseModel):
