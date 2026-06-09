@@ -3,9 +3,27 @@ Pipeline — the actions no existing tool provides (trigger data versioning,
 training, CI gate). Viewing/inspection lives in MLflow / MinIO / Grafana / W&B
 (see the Links page).
 """
+import subprocess
+import time
+
 import streamlit as st
 
 from api import api_get, api_post
+
+
+def _ssh_tail(host: str, port: str, lines: int = 400) -> tuple[bool, str]:
+    """Run `tail -n <lines>` on the instance via SSH (local ssh client + Vast key)."""
+    try:
+        out = subprocess.run(
+            ["ssh", "-p", str(port),
+             "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+             "-o", "ConnectTimeout=8",
+             f"root@{host}", f"tail -n {lines} /var/log/onstart.log"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return (True, out.stdout) if out.returncode == 0 else (False, out.stderr.strip() or "ssh failed")
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
 
 st.title("🎛️ Pipeline Actions")
 
@@ -98,14 +116,24 @@ with tab_train:
                 st.json(status["metrics"])
 
             st.subheader("Live logs")
-            ssh_cmd = status.get("ssh_cmd")
-            if ssh_cmd:
-                st.caption("Chạy lệnh này ở terminal để xem log **live** (không lag):")
-                st.code(ssh_cmd, language="bash")
+            ssh_host, ssh_port = status.get("ssh_host"), status.get("ssh_port")
+            if ssh_host and ssh_port:
+                stream = st.toggle("🔴 Stream live (SSH, poll mỗi 2s)", key="stream_logs")
+                ph = st.empty()
+                ok, text = _ssh_tail(ssh_host, ssh_port)
+                if ok:
+                    ph.code(text or "(empty)")
+                elif stream:
+                    ph.error(f"SSH: {text}")
+                else:
+                    ph.warning(f"SSH chưa kết nối được: {text}")
+                if stream and ok:
+                    time.sleep(2)
+                    st.rerun()
             else:
-                st.caption("Instance chưa provisioned xong — lệnh SSH sẽ xuất hiện khi sẵn sàng.")
+                st.caption("Instance chưa provisioned xong — log sẽ stream được khi sẵn sàng.")
 
-        with st.expander("Snapshot logs (qua API, ~1 phút lag)"):
+        with st.expander("Snapshot logs (qua Vast API, ~1 phút lag)"):
             tail = st.slider("tail lines", 50, 1000, 200, step=50)
             if st.button("Fetch snapshot"):
                 with st.spinner("Fetching logs…"):

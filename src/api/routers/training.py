@@ -198,6 +198,8 @@ def get_training_status(job_id: str, client=Depends(get_mlflow_client)):
         wandb_run_url=run.data.tags.get("wandb_url"),
         metrics=dict(run.data.metrics) or None,
         vast_instance_id=run.data.tags.get("vast_instance_id"),
+        ssh_host=ssh_host,
+        ssh_port=ssh_port,
         ssh_cmd=ssh_cmd,
     )
 

@@ -61,6 +61,8 @@ class TrainingJobStatus(BaseModel):
     wandb_run_url: str | None = None
     metrics: dict[str, float] | None = None
     vast_instance_id: str | None = None
+    ssh_host: str | None = None
+    ssh_port: str | None = None
     ssh_cmd: str | None = None   # ready-to-run SSH tail for live logs
 
 
