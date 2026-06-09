@@ -133,9 +133,13 @@ with tab_train:
                     ph.code(text or "(empty)")
                 else:
                     ph.warning(f"SSH chưa kết nối được (đang thử lại): {text}")
-                # Auto-loop: keep polling (retries until the instance is reachable)
-                time.sleep(2)
-                st.rerun()
+                # Auto-loop only while the job is still running, so the page stops
+                # refreshing once training completes/fails (no perpetual rerun).
+                if status.get("status") == "running":
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.caption("Job đã kết thúc — log cố định (không refresh nữa).")
             else:
                 st.caption("Instance chưa provisioned xong — log sẽ stream khi sẵn sàng.")
 
