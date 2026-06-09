@@ -16,8 +16,9 @@ class TrainConfig:
     max_length: int = 4500
     minio_bucket: str = "ocr-data"
 
-    # ── Post-training CER eval (generate-based; for CI gate) ──────────────────
-    cer_eval_samples: int = 50
+    # ── Post-training CER eval (batched generate; for CI gate) ───────────────
+    cer_batch_size: int = 8        # samples per generate() call
+    cer_max_new_tokens: int = 2048 # cap generated length (docling output rarely longer)
 
     # ── Checkpointing (resume granularity) ────────────────────────────────────
     save_steps: int = 25          # save a checkpoint every N optimizer steps
@@ -25,8 +26,8 @@ class TrainConfig:
 
     # ── Training hyperparameters ──────────────────────────────────────────────
     learning_rate: float = 5e-5
-    batch_size: int = 1
-    grad_accum: int = 16
+    batch_size: int = 4      # 48GB VRAM (RTX 6000 Ada) — was 1 on 24GB
+    grad_accum: int = 4      # effective batch stays 16
     num_epochs: int = 10
     warmup_ratio: float = 0.05
     weight_decay: float = 0.01

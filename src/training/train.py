@@ -209,48 +209,56 @@ def evaluate_cer(
     config: TrainConfig | None = None,
     n_samples: int | None = None,
     max_new_tokens: int | None = None,
+    batch_size: int | None = None,
 ) -> float:
     """
-    Compute mean CER on a subset of `df` by generating predictions and comparing
-    to ground-truth output_text (XML tags stripped on both sides).
+    Compute mean CER over `df` by batched generation, comparing predictions to
+    ground-truth output_text (XML tags stripped on both sides).
 
-    Generation uses the KV cache (incremental) so it avoids the full-sequence
-    logits tensor that makes in-loop eval OOM. Runs on cfg.cer_eval_samples rows.
+    Batched generation (cer_batch_size rows per generate call) is much faster
+    than one-at-a-time. Uses the KV cache (no full-sequence logits → no OOM).
+
+    n_samples=None evaluates the WHOLE df (full benchmark); otherwise df.head(n).
     """
     import torch
     from src.training.evaluate import compute_batch_cer, strip_xml_tags
 
     cfg = config or TrainConfig()
-    n = n_samples or cfg.cer_eval_samples
-    new_tokens = max_new_tokens or cfg.max_length
-    eval_df = df.head(n)
+    new_tokens = max_new_tokens or cfg.cer_max_new_tokens
+    bs = batch_size or cfg.cer_batch_size
+    eval_df = df if n_samples is None else df.head(n_samples)
 
-    # generate() needs cache on and checkpointing off
+    # generate() needs cache on, checkpointing off, and LEFT padding for batching
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
     model.config.use_cache = True
     model.eval()
+    processor.tokenizer.padding_side = "left"
 
+    prompt = processor.apply_chat_template(
+        [{"role": "user", "content": [{"type": "image"},
+                                       {"type": "text", "text": _USER_PROMPT}]}],
+        tokenize=False, add_generation_prompt=True,
+    )
+
+    rows = eval_df.to_dict("records")
     preds, gts = [], []
-    for _, row in tqdm(
-        eval_df.iterrows(), total=len(eval_df), desc="  CER eval", leave=False
-    ):
-        messages = [{
-            "role": "user",
-            "content": [{"type": "image"}, {"type": "text", "text": _USER_PROMPT}],
-        }]
-        text = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+    for start in tqdm(range(0, len(rows), bs), desc="  CER eval", leave=False):
+        batch = rows[start:start + bs]
         inputs = processor(
-            text=[text], images=[[_decode_image(row["image"])]], return_tensors="pt"
+            text=[prompt] * len(batch),
+            images=[[_decode_image(r["image"])] for r in batch],
+            return_tensors="pt",
+            padding=True,
         ).to(model.device)
         with torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=new_tokens, do_sample=False)
-        gen_ids = out[0][inputs["input_ids"].shape[1]:]
-        pred = processor.tokenizer.decode(gen_ids, skip_special_tokens=True)
-        preds.append(strip_xml_tags(pred))
-        gts.append(strip_xml_tags(row["output_text"]))
+        # left padding → generated tokens start uniformly after the padded prompt
+        gen = out[:, inputs["input_ids"].shape[1]:]
+        decoded = processor.tokenizer.batch_decode(gen, skip_special_tokens=True)
+        for r, pred in zip(batch, decoded):
+            preds.append(strip_xml_tags(pred))
+            gts.append(strip_xml_tags(r["output_text"]))
 
     return compute_batch_cer(preds, gts)
 
@@ -399,7 +407,7 @@ def train(
         print(f"[train] computing CER ...", flush=True)
         cer = evaluate_cer(
             model, processor, bench_df, cfg,
-            n_samples=1 if smoke_test else None,
+            n_samples=1 if smoke_test else None,   # None → full benchmark
             max_new_tokens=64 if smoke_test else None,
         )
         mlflow.log_metric("cer", cer)
