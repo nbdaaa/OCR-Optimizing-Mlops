@@ -28,7 +28,10 @@ with tab_data:
                 body["max_samples"] = int(max_samples)
             with st.spinner("Creating version (download → filter → dedup → upload)…"):
                 ok, res = api_post("/data/versions/create", json=body)
-            st.success(f"Created {res['version']} · run {res['mlflow_run_id'][:8]}") if ok else st.error(res)
+            if ok:
+                st.success(f"Created {res['version']} · run {res['mlflow_run_id'][:8]}")
+            else:
+                st.error(res)
 
 # ── Training: trigger + track ────────────────────────────────────────────────
 with tab_train:
@@ -99,7 +102,10 @@ with tab_train:
         if st.button("Fetch logs"):
             with st.spinner("Fetching logs…"):
                 ok, logs = api_get(f"/training/{job_id}/logs", params={"tail": tail}, timeout=60)
-            st.code(logs.get("logs", "") or "(empty)") if ok else st.error(logs)
+            if ok:
+                st.code(logs.get("logs", "") or "(empty)")
+            else:
+                st.error(logs)
 
 # ── CI/CD gate ────────────────────────────────────────────────────────────────
 with tab_gate:
@@ -118,10 +124,11 @@ with tab_gate:
             st.error(res)
         else:
             result = res.get("result")
-            (st.success if result == "pass" else st.error)(
-                f"{result.upper()} → {res.get('new_stage')}",
-                icon="🟢" if result == "pass" else "🔴",
-            )
+            msg = f"{result.upper()} → {res.get('new_stage')}"
+            if result == "pass":
+                st.success(msg, icon="🟢")
+            else:
+                st.error(msg, icon="🔴")
             c1, c2, c3 = st.columns(3)
             c1.metric("Staging version", res.get("staging_version"))
             c2.metric("Staging CER", f"{res.get('staging_cer'):.4f}")
