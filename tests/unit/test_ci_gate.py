@@ -83,6 +83,7 @@ class TestCIGateMLflowTransitions:
             name="granite-docling-adapter",
             version=2,
             stage="Production",
+            archive_existing_versions=True,   # single Production
         )
 
     def test_archives_on_fail_cer(self, gate, mock_mlflow_client):
@@ -91,6 +92,7 @@ class TestCIGateMLflowTransitions:
             name="granite-docling-adapter",
             version=2,
             stage="Archived",
+            archive_existing_versions=False,
         )
 
     def test_archives_on_fail_regression(self, gate, mock_mlflow_client):
@@ -99,6 +101,7 @@ class TestCIGateMLflowTransitions:
             name="granite-docling-adapter",
             version=3,
             stage="Archived",
+            archive_existing_versions=False,
         )
 
     def test_transition_called_exactly_once(self, gate, mock_mlflow_client):

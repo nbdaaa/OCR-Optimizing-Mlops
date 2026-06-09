@@ -83,6 +83,10 @@ class CIGate:
             FAIL_CER         → stage "Archived"
             FAIL_REGRESSION  → stage "Archived"
 
+        On PASS, archive_existing_versions=True so the newly promoted version is
+        the SINGLE Production version (any prior Production → Archived) — MLflow
+        does not enforce one-Production-per-model on its own.
+
         Args:
             version: MLflow model version number.
             result:  CIGateResult from evaluate().
@@ -92,4 +96,5 @@ class CIGate:
             name=self.config.model_name,
             version=version,
             stage=stage,
+            archive_existing_versions=(stage == "Production"),
         )
