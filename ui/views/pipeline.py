@@ -122,11 +122,19 @@ elif section == _TRAIN:
 
     st.divider()
     st.subheader("Track a job")
-    job_id = st.selectbox(
-        "Job id", st.session_state.training_jobs,
-        index=0 if st.session_state.training_jobs else None,
-        placeholder="select a triggered job",
-    ) or st.text_input("…or paste a job_id")
+    ok_j, jobs_resp = api_get("/training/jobs")
+    jobs = jobs_resp.get("jobs", []) if ok_j else []
+    badge = {"running": "🟡", "completed": "🟢", "failed": "🔴"}
+    options = {
+        f"{badge.get(j['status'], '⚪')} {j['status']} · {j['job_id'][:8]} · {j.get('data_version') or ''}":
+            j["job_id"]
+        for j in jobs
+    }
+    if options:
+        label = st.selectbox("Job (mới nhất ở trên)", list(options.keys()))
+        job_id = options.get(label)
+    else:
+        job_id = st.text_input("Job id (chưa có job nào — dán job_id)")
 
     if job_id:
         ok, status = api_get(f"/training/{job_id}/status")

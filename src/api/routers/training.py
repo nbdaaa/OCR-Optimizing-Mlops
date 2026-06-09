@@ -19,6 +19,8 @@ from src.api.schemas import (
     TriggerTrainingResponse,
     TrainingJobStatus,
     TrainingLogsResponse,
+    TrainingJobBrief,
+    TrainingJobsResponse,
 )
 from src.serving.scaler import _VAST_BASE
 
@@ -166,6 +168,26 @@ def trigger_training(
         request.init_adapter_version, hyperparams,
     )
     return TriggerTrainingResponse(job_id=run_id)
+
+
+@router.get("/jobs", response_model=TrainingJobsResponse)
+def list_jobs(client=Depends(get_mlflow_client)):
+    """List recent training runs (job_id = run_id) in the ocr-training experiment,
+    newest first — so the UI can find a running job from any session."""
+    exp = client.get_experiment_by_name(_EXPERIMENT)
+    if exp is None:
+        return TrainingJobsResponse(jobs=[])
+    runs = client.search_runs([exp.experiment_id], max_results=50)
+    runs = sorted(runs, key=lambda r: r.info.start_time or 0, reverse=True)
+    jobs = [
+        TrainingJobBrief(
+            job_id=r.info.run_id,
+            status=_STATUS_MAP.get(r.info.status, r.info.status.lower()),
+            data_version=r.data.params.get("data_version"),
+        )
+        for r in runs
+    ]
+    return TrainingJobsResponse(jobs=jobs)
 
 
 @router.get("/{job_id}/status", response_model=TrainingJobStatus)

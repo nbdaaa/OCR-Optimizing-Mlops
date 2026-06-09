@@ -72,6 +72,16 @@ class TrainingLogsResponse(BaseModel):
     logs: str
 
 
+class TrainingJobBrief(BaseModel):
+    job_id: str
+    status: str
+    data_version: str | None = None
+
+
+class TrainingJobsResponse(BaseModel):
+    jobs: list[TrainingJobBrief]
+
+
 # ── Model registry ────────────────────────────────────────────────────────────
 
 class ModelVersionInfo(BaseModel):
