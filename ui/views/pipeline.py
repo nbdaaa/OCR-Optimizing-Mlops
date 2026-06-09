@@ -120,7 +120,10 @@ with tab_train:
             if ssh_host and ssh_port:
                 stream = st.toggle("🔴 Stream live (SSH, poll mỗi 2s)", key="stream_logs")
                 st.session_state.setdefault("live_log_cache", "")
-                ph = st.empty()
+                # Fixed-height, independently scrollable box (own scrollbar,
+                # không dùng chung scroll trang).
+                log_box = st.container(height=420)
+                ph = log_box.empty()
                 # Render cached content first so the box never blanks during the
                 # ~1s SSH fetch (avoids the disappear/reappear flicker on rerun).
                 if st.session_state.live_log_cache:
