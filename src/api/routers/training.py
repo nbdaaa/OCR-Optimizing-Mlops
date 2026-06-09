@@ -118,7 +118,10 @@ def _provision_and_train(
 
     try:
         instance = AutoScaler(cfg)._create_vast_instance(image=train_image, onstart=onstart)
-        mlflow.MlflowClient().set_tag(run_id, "vast_instance_id", instance["id"])
+        c = mlflow.MlflowClient()
+        c.set_tag(run_id, "vast_instance_id", instance["id"])
+        c.set_tag(run_id, "vast_ssh_host", instance.get("ssh_host", ""))
+        c.set_tag(run_id, "vast_ssh_port", instance.get("ssh_port", ""))
     except Exception as exc:
         mlflow.MlflowClient().set_tag(run_id, "provision_error", str(exc))
         raise
@@ -180,6 +183,14 @@ def get_training_status(job_id: str, client=Depends(get_mlflow_client)):
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
     mlflow_url = f"{tracking_uri}/#/experiments/{run.info.experiment_id}/runs/{job_id}"
 
+    # Ready-to-run SSH command for LIVE logs (no lag, unlike the snapshot API)
+    ssh_host = run.data.tags.get("vast_ssh_host")
+    ssh_port = run.data.tags.get("vast_ssh_port")
+    ssh_cmd = (
+        f'ssh -p {ssh_port} root@{ssh_host} "tail -f /var/log/onstart.log"'
+        if ssh_host and ssh_port else None
+    )
+
     return TrainingJobStatus(
         job_id=job_id,
         status=_STATUS_MAP.get(run.info.status, run.info.status.lower()),
@@ -187,6 +198,7 @@ def get_training_status(job_id: str, client=Depends(get_mlflow_client)):
         wandb_run_url=run.data.tags.get("wandb_url"),
         metrics=dict(run.data.metrics) or None,
         vast_instance_id=run.data.tags.get("vast_instance_id"),
+        ssh_cmd=ssh_cmd,
     )
 
 

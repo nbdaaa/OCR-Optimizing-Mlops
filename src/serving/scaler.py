@@ -313,6 +313,9 @@ class AutoScaler:
             if inst.get("actual_status") == "running":
                 host = inst["public_ipaddr"]
                 ssh_port = str(inst.get("ssh_port", 22))
+                # Vast SSH goes through a proxy host (sshN.vast.ai), not the
+                # public IP — fall back to public IP if not provided.
+                ssh_host = inst.get("ssh_host") or host
                 # Vast maps internal 8000 → a dynamic external port (in `ports`).
                 ports = inst.get("ports") or {}
                 mapping = ports.get("8000/tcp") or [{}]
@@ -321,6 +324,7 @@ class AutoScaler:
                     "id": instance_id,
                     "address": f"{host}:{ext_port}",
                     "ssh_port": ssh_port,
+                    "ssh_host": ssh_host,
                 }
 
         raise TimeoutError(

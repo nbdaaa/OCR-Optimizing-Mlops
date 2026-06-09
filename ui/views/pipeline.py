@@ -97,15 +97,23 @@ with tab_train:
             if status.get("metrics"):
                 st.json(status["metrics"])
 
-        st.caption("Raw onstart log via Vast (≈1 min lag). Use W&B for live metrics.")
-        tail = st.slider("tail lines", 50, 1000, 200, step=50)
-        if st.button("Fetch logs"):
-            with st.spinner("Fetching logs…"):
-                ok, logs = api_get(f"/training/{job_id}/logs", params={"tail": tail}, timeout=60)
-            if ok:
-                st.code(logs.get("logs", "") or "(empty)")
+            st.subheader("Live logs")
+            ssh_cmd = status.get("ssh_cmd")
+            if ssh_cmd:
+                st.caption("Chạy lệnh này ở terminal để xem log **live** (không lag):")
+                st.code(ssh_cmd, language="bash")
             else:
-                st.error(logs)
+                st.caption("Instance chưa provisioned xong — lệnh SSH sẽ xuất hiện khi sẵn sàng.")
+
+        with st.expander("Snapshot logs (qua API, ~1 phút lag)"):
+            tail = st.slider("tail lines", 50, 1000, 200, step=50)
+            if st.button("Fetch snapshot"):
+                with st.spinner("Fetching logs…"):
+                    ok, logs = api_get(f"/training/{job_id}/logs", params={"tail": tail}, timeout=60)
+                if ok:
+                    st.code(logs.get("logs", "") or "(empty)")
+                else:
+                    st.error(logs)
 
 # ── CI/CD gate ────────────────────────────────────────────────────────────────
 with tab_gate:
