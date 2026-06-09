@@ -17,12 +17,8 @@ st.set_page_config(page_title="OCR-MLOps", page_icon="🧩", layout="wide")
 render_sidebar_config()
 
 pages = [
-    st.Page("views/dashboard.py", title="Dashboard", icon="📊"),
-    st.Page("views/data.py",      title="Data",      icon="🗂️"),
-    st.Page("views/training.py",  title="Training",  icon="🏋️"),
-    st.Page("views/models.py",    title="Models",    icon="📦"),
-    st.Page("views/cicd.py",      title="CI/CD Gate", icon="✅"),
-    st.Page("views/monitor.py",   title="Monitor",   icon="📈"),
+    st.Page("views/pipeline.py", title="Pipeline", icon="🎛️"),
+    st.Page("views/links.py",    title="Links",    icon="🔗"),
 ]
 
 st.navigation(pages).run()
