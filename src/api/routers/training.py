@@ -65,12 +65,18 @@ def _build_env_block() -> str:
 
 
 def _build_onstart(
-    data_version: str, run_id: str, env_block: str, init_adapter_version: str | None
+    data_version: str, run_id: str, env_block: str,
+    init_adapter_version: str | None, hyperparams: dict,
 ) -> str:
     """Bootstrap script the training instance runs on boot."""
     work_dir = os.environ.get("REMOTE_WORK_DIR", "/workspace/OCR-Optimizing-Mlops")
     git_repo = os.environ["GIT_REPO_URL"]
-    init_arg = f" --init-adapter-version {init_adapter_version}" if init_adapter_version else ""
+    args = f"--data-version {data_version} --run-id {run_id}"
+    if init_adapter_version:
+        args += f" --init-adapter-version {init_adapter_version}"
+    for flag, val in hyperparams.items():
+        if val is not None:
+            args += f" {flag} {val}"
     return f"""#!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -82,12 +88,12 @@ pip install -q -r requirements-train.txt
 cat > .env <<'ENVEOF'
 {env_block}
 ENVEOF
-python -m src.training.train --data-version {data_version} --run-id {run_id}{init_arg}
+python -m src.training.train {args}
 """
 
 
 def _provision_and_train(
-    run_id: str, data_version: str, init_adapter_version: str | None
+    run_id: str, data_version: str, init_adapter_version: str | None, hyperparams: dict
 ) -> None:
     """
     Background task: provision a Vast.ai GPU instance whose onstart script
@@ -106,7 +112,9 @@ def _provision_and_train(
     train_image = os.environ.get(
         "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel"
     )
-    onstart = _build_onstart(data_version, run_id, _build_env_block(), init_adapter_version)
+    onstart = _build_onstart(
+        data_version, run_id, _build_env_block(), init_adapter_version, hyperparams
+    )
 
     try:
         instance = AutoScaler(cfg)._create_vast_instance(image=train_image, onstart=onstart)
@@ -144,8 +152,15 @@ def trigger_training(
     )
     run_id = run.info.run_id
 
+    hyperparams = {
+        "--num-epochs":   request.num_epochs,
+        "--batch-size":   request.batch_size,
+        "--grad-accum":   request.grad_accum,
+        "--learning-rate": request.learning_rate,
+    }
     background_tasks.add_task(
-        _provision_and_train, run_id, request.data_version, request.init_adapter_version
+        _provision_and_train, run_id, request.data_version,
+        request.init_adapter_version, hyperparams,
     )
     return TriggerTrainingResponse(job_id=run_id)
 

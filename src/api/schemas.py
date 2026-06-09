@@ -39,6 +39,11 @@ class VersionListResponse(BaseModel):
 class TriggerTrainingRequest(BaseModel):
     data_version: str
     init_adapter_version: str | None = None   # continual warm-start; None = latest
+    # Optional hyperparameter overrides (None → use TrainConfig defaults)
+    num_epochs: int | None = None
+    batch_size: int | None = None
+    grad_accum: int | None = None
+    learning_rate: float | None = None
 
 
 class TriggerTrainingResponse(BaseModel):

@@ -468,11 +468,28 @@ if __name__ == "__main__":
         "--init-adapter-version", default=None,
         help="Continual: warm-start from this model version (default: latest)",
     )
+    # Optional hyperparameter overrides (default → TrainConfig values)
+    parser.add_argument("--num-epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--grad-accum", type=int, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
     args = parser.parse_args()
+
+    cfg = TrainConfig()
+    if args.num_epochs is not None:
+        cfg.num_epochs = args.num_epochs
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
+    if args.grad_accum is not None:
+        cfg.grad_accum = args.grad_accum
+    if args.learning_rate is not None:
+        cfg.learning_rate = args.learning_rate
+
     print(train(
         args.data_version,
         args.output_dir,
         args.smoke_test,
+        config=cfg,
         run_id=args.run_id,
         resume_from_checkpoint=args.resume,
         init_adapter_version=args.init_adapter_version,
