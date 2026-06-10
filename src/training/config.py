@@ -16,6 +16,9 @@ class TrainConfig:
     max_length: int = 4500
     minio_bucket: str = "ocr-data"
 
+    # ── Per-epoch eval (cross-entropy loss on a held-out split) ──────────────
+    val_split: float = 0.1         # fraction of the train version held out for eval_loss
+
     # ── Post-training CER eval (batched generate; for CI gate) ───────────────
     cer_batch_size: int = 8        # samples per generate() call
     cer_max_new_tokens: int = 2048 # cap generated length (docling output rarely longer)

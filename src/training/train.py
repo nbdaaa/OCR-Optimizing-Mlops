@@ -120,11 +120,13 @@ def build_training_args(
         weight_decay=cfg.weight_decay,
         bf16=True,
         logging_steps=10,
-        # In-loop eval materializes full-sequence logits (text + thousands of
-        # image tokens) → ~8GB cross-entropy alloc that OOMs a 24GB card, even
-        # though the gradient-checkpointed training step fits. It only yields
-        # eval_loss anyway; CER is computed separately via evaluate.py.
-        eval_strategy="no",
+        # Per-epoch eval_loss on the held-out split. prediction_loss_only=True is
+        # essential: it discards logits after computing loss, avoiding the ~8GB
+        # full-sequence (text + thousands of image tokens) cross-entropy alloc
+        # that OOMed earlier. CER (generate-based) still runs once at the end.
+        eval_strategy="epoch" if cfg.val_split > 0 else "no",
+        per_device_eval_batch_size=cfg.batch_size,
+        prediction_loss_only=True,
         save_strategy="steps",
         save_steps=cfg.save_steps,
         save_total_limit=cfg.save_total_limit,
@@ -358,6 +360,15 @@ def train(
     hf_dataset = HFDataset.from_pandas(df)
     print(f"[train] loaded {len(hf_dataset):,} samples", flush=True)
 
+    # Hold out a fraction for per-epoch eval_loss (overfit signal). Smoke test
+    # and val_split<=0 keep the whole set for training (no eval).
+    eval_dataset = None
+    if not smoke_test and cfg.val_split > 0 and len(hf_dataset) > 1:
+        split = hf_dataset.train_test_split(test_size=cfg.val_split, seed=42)
+        hf_dataset, eval_dataset = split["train"], split["test"]
+        print(f"[train] split → {len(hf_dataset):,} train / {len(eval_dataset):,} val "
+              f"({cfg.val_split:.0%})", flush=True)
+
     print(f"[train] loading processor ({cfg.base_model}) ...", flush=True)
     processor = AutoProcessor.from_pretrained(cfg.base_model, token=hf_token)
     print(f"[train] loading base model (downloads from HF on first run) ...", flush=True)
@@ -421,7 +432,7 @@ def train(
             model=model,
             args=build_training_args(output_dir, cfg, smoke_test=smoke_test),
             train_dataset=hf_dataset,
-            eval_dataset=hf_dataset,
+            eval_dataset=eval_dataset,
             data_collator=DataCollatorForOCR(processor, cfg),
             callbacks=[_CkptUploader()],
         )
