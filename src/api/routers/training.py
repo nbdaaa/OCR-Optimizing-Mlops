@@ -119,7 +119,7 @@ def _provision_and_train(
         state_file="",            # unused for training
     )
     train_image = os.environ.get(
-        "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel"
+        "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel"
     )
     onstart = _build_onstart(
         data_version, run_id, _build_env_block(), init_adapter_version, hyperparams
@@ -164,7 +164,7 @@ python -m src.training.train --recover --run-id {run_id}
         state_file="",
     )
     train_image = os.environ.get(
-        "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel"
+        "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel"
     )
     try:
         instance = AutoScaler(cfg)._create_vast_instance(image=train_image, onstart=onstart)
