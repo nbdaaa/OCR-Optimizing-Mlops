@@ -102,7 +102,12 @@ def trigger_deploy(
         )
 
     scaler = _build_scaler()
-    instance = scaler._create_vast_instance(onstart=_build_serve_onstart())
+    # Serving pulls the multi-GB vLLM image on first boot → require a fast link
+    # (default 2000 Mbps floor) so the pull doesn't dominate deploy time.
+    serve_min_inet = float(os.environ.get("VAST_SERVE_MIN_INET_MBPS", "2000"))
+    instance = scaler._create_vast_instance(
+        onstart=_build_serve_onstart(), min_inet=serve_min_inet
+    )
     scaler.state.instances.append(instance)
     scaler.save_state()
 

@@ -86,7 +86,8 @@ class AutoScaler:
         Provision a new Vast.ai instance, add it to nginx upstream, persist state.
         Updates last_scale_time after a successful scale event.
         """
-        new_instance = self._create_vast_instance()
+        serve_min_inet = float(os.environ.get("VAST_SERVE_MIN_INET_MBPS", "2000"))
+        new_instance = self._create_vast_instance(min_inet=serve_min_inet)
         self.state.instances.append(new_instance)
         self.state.last_scale_time = time.time()
         self._write_nginx_upstream()
@@ -170,10 +171,14 @@ class AutoScaler:
     # GPUs we accept — all >= 24GB VRAM, common on Vast.ai
     _ALLOWED_GPUS = ["RTX 3090", "RTX 4090", "RTX 5090"]
 
-    def _find_best_offer(self) -> str:
+    def _find_best_offer(self, min_inet_override: float | None = None) -> str:
         """
         Search Vast.ai marketplace for a rentable offer on one of _ALLOWED_GPUS
         and return its id.
+
+        min_inet_override: hard floor for up/down Mbps that takes precedence over
+        the VAST_MIN_INET_MBPS env (serving passes a higher floor so the vLLM
+        image — several GB — pulls quickly on first boot).
 
         Strategy: filter offers that meet the minimum requirements (allowed GPU,
         disk, network up/down speed), then pick the CHEAPEST among them. Network
@@ -188,7 +193,8 @@ class AutoScaler:
 
         Returns the offer id as a string. Raises RuntimeError if none match.
         """
-        min_inet  = float(os.environ.get("VAST_MIN_INET_MBPS", "100"))
+        min_inet  = (min_inet_override if min_inet_override is not None
+                     else float(os.environ.get("VAST_MIN_INET_MBPS", "100")))
         min_disk  = int(os.environ.get("VAST_MIN_DISK_GB", "40"))
         max_price = os.environ.get("VAST_MAX_PRICE")
         # Exclude countries with throttled/blocked international links (e.g. CN
@@ -246,7 +252,8 @@ class AutoScaler:
         return str(best["id"])
 
     def _create_vast_instance(
-        self, image: str | None = None, onstart: str | None = None
+        self, image: str | None = None, onstart: str | None = None,
+        min_inet: float | None = None,
     ) -> dict:
         """
         Call Vast.ai REST API to launch a new GPU instance.
@@ -264,7 +271,7 @@ class AutoScaler:
                      + run). When set, no SSH is needed — the instance self-runs.
         """
         img = image or os.environ.get("VLLM_DOCKER_IMAGE", "vllm/vllm-openai:latest")
-        offer_id = self.config.gpu_template_id or self._find_best_offer()
+        offer_id = self.config.gpu_template_id or self._find_best_offer(min_inet)
         url = f"{_VAST_BASE}/asks/{offer_id}/"
         payload = {
             "client_id": "me",
