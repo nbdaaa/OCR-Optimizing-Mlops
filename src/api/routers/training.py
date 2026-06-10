@@ -44,6 +44,9 @@ _FORWARD_AS_IS = [
     "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET_DATA",
     "HF_TOKEN", "HF_REPO_DATA",
     "WANDB_API_KEY", "WANDB_PROJECT",
+    # Forwarded so the instance can self-destruct (DELETE its own Vast contract)
+    # once the job finishes → no idle GPU burning money.
+    "VAST_API_KEY",
 ]
 
 # Endpoint vars: the remote can't resolve docker network names (minio/mlflow),

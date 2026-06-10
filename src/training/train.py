@@ -291,6 +291,36 @@ def register_adapter(
     return version.version
 
 
+def _self_destruct(run_id: str) -> None:
+    """
+    Destroy the Vast.ai instance this job is running on, so a finished job
+    doesn't leave an idle GPU burning money. Best-effort: needs VAST_API_KEY
+    (forwarded into the instance .env) and the instance id (read from the run's
+    vast_instance_id tag, set by the control plane after provisioning).
+    Disable with TRAIN_AUTO_DESTROY=0 (e.g. when debugging on the box).
+    """
+    if os.environ.get("TRAIN_AUTO_DESTROY", "1") != "1":
+        print("[train] auto-destroy disabled (TRAIN_AUTO_DESTROY=0)", flush=True)
+        return
+    api_key = os.environ.get("VAST_API_KEY")
+    if not api_key:
+        print("[train] no VAST_API_KEY — skipping self-destruct", flush=True)
+        return
+    try:
+        import requests
+        iid = mlflow.MlflowClient().get_run(run_id).data.tags.get("vast_instance_id")
+        if not iid:
+            print("[train] no vast_instance_id tag — skipping self-destruct", flush=True)
+            return
+        print(f"[train] job done → destroying Vast instance {iid}", flush=True)
+        requests.delete(
+            f"https://console.vast.ai/api/v0/instances/{iid}/",
+            params={"api_key": api_key}, timeout=20,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail the job over cleanup
+        print(f"[train] self-destruct failed (destroy manually): {exc}", flush=True)
+
+
 # ── Continual warm-start ──────────────────────────────────────────────────────
 
 def resolve_warmstart_version(mlflow_client, model_name: str, init_version: str | None):
@@ -480,6 +510,8 @@ def train(
 
     wandb.finish()
     register_adapter(run_id, config=cfg)
+    if not smoke_test:
+        _self_destruct(run_id)
     return run_id
 
 
@@ -536,12 +568,14 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
 
     if action == "DONE":
         print("[recover] already registered — nothing to do.", flush=True)
+        _self_destruct(run_id)
         return run_id
 
     if action == "REGISTER_ONLY":
         register_adapter(run_id, config=cfg)
         client.set_terminated(run_id, status="FINISHED")  # leave RUNNING → watchdog stops
         print("[recover] registered to Staging.", flush=True)
+        _self_destruct(run_id)
         return run_id
 
     if action == "FINALIZE":
@@ -566,6 +600,7 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
         register_adapter(run_id, config=cfg)
         client.set_terminated(run_id, status="FINISHED")  # leave RUNNING → watchdog stops
         print("[recover] registered to Staging.", flush=True)
+        _self_destruct(run_id)
         return run_id
 
     # RESUME_TRAIN — download the durable checkpoint and continue training, using
