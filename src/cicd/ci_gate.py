@@ -24,9 +24,9 @@ class CIGateConfig:
     model_name:           Registered model name in MLflow Registry.
     cer_threshold:        Max acceptable CER (on the fixed benchmark) for a model
                           to reach Production — absolute quality floor.
-    regression_tolerance: Staging eval_loss (val cross-entropy) must be
-                          <= production eval_loss * tolerance. 1.05 means up to
-                          5% worse than Production is allowed.
+    regression_tolerance: Staging benchmark_loss (CE on the fixed benchmark)
+                          must be <= production benchmark_loss * tolerance.
+                          1.05 means up to 5% worse than Production is allowed.
     """
     model_name: str
     cer_threshold: float = 0.15

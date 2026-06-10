@@ -57,11 +57,13 @@ def run_ci_gate(
             detail=f"Staging version {staging.version} has no 'cer' metric. "
                    "Make sure train.py logs cer before registering the adapter.",
         )
-    staging_loss = _get_metric(client, staging.run_id, "eval_loss")
+    # Regression uses benchmark_loss (CE on the FIXED benchmark) — comparable
+    # across versions, unlike per-epoch eval_loss (each version's own val split).
+    staging_loss = _get_metric(client, staging.run_id, "benchmark_loss")
 
     production = next((v for v in versions if v.current_stage == "Production"), None)
     production_cer = _get_metric(client, production.run_id, "cer") if production else None
-    production_loss = _get_metric(client, production.run_id, "eval_loss") if production else None
+    production_loss = _get_metric(client, production.run_id, "benchmark_loss") if production else None
 
     cfg = CIGateConfig(
         model_name=_MODEL_NAME,

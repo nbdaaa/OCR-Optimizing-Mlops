@@ -265,6 +265,45 @@ def evaluate_cer(
     return compute_batch_cer(preds, gts)
 
 
+# ── Loss evaluation (teacher-forced cross-entropy on the benchmark) ───────────
+
+def evaluate_loss(
+    model,
+    processor,
+    df: pd.DataFrame,
+    config: TrainConfig | None = None,
+    batch_size: int | None = None,
+) -> float:
+    """
+    Mean teacher-forced cross-entropy over `df`, using the SAME label masking as
+    training. Run on the FIXED benchmark so it's comparable across continual
+    versions (the per-epoch eval_loss runs on each version's own 10% val split,
+    which differs between versions → not comparable). The CI gate's regression
+    check reads this (logged as 'benchmark_loss').
+
+    Forward-with-labels only (no generation) → cheap; right padding like training.
+    """
+    import torch
+
+    cfg = config or TrainConfig()
+    bs = batch_size or cfg.batch_size
+    collator = DataCollatorForOCR(processor, cfg)
+
+    processor.tokenizer.padding_side = "right"
+    model.eval()
+    model.config.use_cache = False
+
+    rows = df.to_dict("records")
+    total, n = 0.0, 0
+    for start in tqdm(range(0, len(rows), bs), desc="  loss eval", leave=False):
+        batch = collator(rows[start:start + bs])
+        batch = {k: v.to(model.device) for k, v in batch.items()}
+        with torch.no_grad():
+            total += float(model(**batch).loss)
+        n += 1
+    return total / max(n, 1)
+
+
 # ── MLflow registration ───────────────────────────────────────────────────────
 
 def register_adapter(
@@ -496,6 +535,17 @@ def train(
                 print(f"[train] WARNING benchmark '{bench_version}' not found ({exc}); "
                       f"CER on TRAIN data (biased)", flush=True)
 
+        # benchmark_loss (teacher-forced CE on the SAME fixed benchmark) → the
+        # metric the CI gate's regression check reads. Run BEFORE CER, which
+        # flips the model to left-padding + generation.
+        print(f"[train] computing benchmark loss ...", flush=True)
+        try:
+            bench_loss = evaluate_loss(model, processor, bench_df, cfg)
+            mlflow.log_metric("benchmark_loss", bench_loss)
+            print(f"[train] benchmark_loss = {bench_loss:.4f}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[train] benchmark loss failed: {exc}", flush=True)
+
         print(f"[train] computing CER ...", flush=True)
         try:
             cer = evaluate_cer(
@@ -589,14 +639,21 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
         local = client.download_artifacts(run_id, "adapter", adapter_dir)
         model = PeftModel.from_pretrained(model, local)
         model.eval()
-        print("[recover] FINALIZE: loaded adapter, computing CER on benchmark …", flush=True)
+        print("[recover] FINALIZE: loaded adapter, evaluating on benchmark …", flush=True)
         try:
             bench_df = load_dataset_from_minio(os.environ.get("BENCHMARK_VERSION", "benchmark"), config=cfg)
+            # benchmark_loss BEFORE CER (CER flips to left-padding + generation)
+            try:
+                bench_loss = evaluate_loss(model, processor, bench_df, cfg)
+                client.log_metric(run_id, "benchmark_loss", bench_loss)
+                print(f"[recover] benchmark_loss = {bench_loss:.4f}", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[recover] benchmark loss failed: {exc}", flush=True)
             cer = evaluate_cer(model, processor, bench_df, cfg)
             client.log_metric(run_id, "cer", cer)
             print(f"[recover] CER = {cer:.4f}", flush=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"[recover] CER failed (still registering): {exc}", flush=True)
+            print(f"[recover] eval failed (still registering): {exc}", flush=True)
         register_adapter(run_id, config=cfg)
         client.set_terminated(run_id, status="FINISHED")  # leave RUNNING → watchdog stops
         print("[recover] registered to Staging.", flush=True)
