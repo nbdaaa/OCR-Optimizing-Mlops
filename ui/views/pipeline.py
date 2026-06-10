@@ -236,3 +236,9 @@ elif section == _GATE:
             c2.metric("Staging CER", f"{res.get('staging_cer'):.4f}")
             prod = res.get("production_cer")
             c3.metric("Production CER", f"{prod:.4f}" if prod is not None else "—")
+            # eval_loss drives the regression check
+            d1, d2 = st.columns(2)
+            sl = res.get("staging_loss")
+            pl = res.get("production_loss")
+            d1.metric("Staging eval_loss", f"{sl:.4f}" if sl is not None else "—")
+            d2.metric("Production eval_loss", f"{pl:.4f}" if pl is not None else "—")

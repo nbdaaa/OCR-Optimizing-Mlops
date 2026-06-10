@@ -22,9 +22,11 @@ class CIGateResult(Enum):
 class CIGateConfig:
     """
     model_name:           Registered model name in MLflow Registry.
-    cer_threshold:        Max acceptable CER for a model to reach Production.
-    regression_tolerance: Staging CER must be <= production_cer * tolerance.
-                          1.05 means up to 5% worse than Production is allowed.
+    cer_threshold:        Max acceptable CER (on the fixed benchmark) for a model
+                          to reach Production — absolute quality floor.
+    regression_tolerance: Staging eval_loss (val cross-entropy) must be
+                          <= production eval_loss * tolerance. 1.05 means up to
+                          5% worse than Production is allowed.
     """
     model_name: str
     cer_threshold: float = 0.15
@@ -46,22 +48,31 @@ class CIGate:
     def evaluate(
         self,
         staging_cer: float,
-        production_cer: float | None,
+        staging_loss: float | None = None,
+        production_loss: float | None = None,
     ) -> CIGateResult:
         """
         Decide whether the Staging model passes the CI gate.
 
+        Two independent signals:
+          - CER (on the fixed benchmark) = absolute quality floor.
+          - eval_loss (val cross-entropy) = regression vs current Production.
+
         Checks (in order):
-            1. staging_cer > cer_threshold         → FAIL_CER
-            2. production_cer is not None AND
-               staging_cer > production_cer * regression_tolerance
-                                                   → FAIL_REGRESSION
-            3. Otherwise                           → PASS
+            1. staging_cer > cer_threshold              → FAIL_CER
+            2. production_loss and staging_loss present AND
+               staging_loss > production_loss * regression_tolerance
+                                                        → FAIL_REGRESSION
+            3. Otherwise                                → PASS
+
+        Regression is skipped when either loss is missing (e.g. no Production
+        yet, or a Production trained before per-epoch eval was added) — the CER
+        floor still applies.
 
         Args:
-            staging_cer:    CER of the model version under evaluation.
-            production_cer: CER of the current Production version.
-                            Pass None when there is no Production version yet.
+            staging_cer:     CER of the version under evaluation (benchmark).
+            staging_loss:    Staging val eval_loss (None → skip regression).
+            production_loss: Current Production val eval_loss (None → skip).
 
         Returns:
             CIGateResult enum value.
@@ -69,8 +80,8 @@ class CIGate:
         if staging_cer > self.config.cer_threshold:
             return CIGateResult.FAIL_CER
 
-        if production_cer is not None:
-            if staging_cer > production_cer * self.config.regression_tolerance:
+        if production_loss is not None and staging_loss is not None:
+            if staging_loss > production_loss * self.config.regression_tolerance:
                 return CIGateResult.FAIL_REGRESSION
 
         return CIGateResult.PASS

@@ -119,8 +119,10 @@ class CIGateRequest(BaseModel):
 class CIGateResponse(BaseModel):
     result: str                          # "pass" | "fail_cer" | "fail_regression"
     staging_version: int
-    staging_cer: float
+    staging_cer: float                   # benchmark CER (absolute floor check)
     production_cer: float | None = None
+    staging_loss: float | None = None    # val eval_loss (regression check)
+    production_loss: float | None = None
     new_stage: str                       # "Production" | "Archived"
 
 

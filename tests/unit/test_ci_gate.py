@@ -28,52 +28,54 @@ def gate(mock_mlflow_client, gate_config):
 
 
 class TestCIGateEvaluate:
-    def test_passes_when_cer_below_threshold_no_production(self, gate):
-        result = gate.evaluate(staging_cer=0.10, production_cer=None)
-        assert result == CIGateResult.PASS
+    # ── CER = absolute quality floor ──────────────────────────────────────────
+    def test_passes_when_cer_below_threshold(self, gate):
+        assert gate.evaluate(staging_cer=0.10) == CIGateResult.PASS
 
-    def test_passes_when_cer_at_threshold_no_production(self, gate):
-        result = gate.evaluate(staging_cer=CER_THRESHOLD, production_cer=None)
-        assert result == CIGateResult.PASS
+    def test_passes_when_cer_at_threshold(self, gate):
+        assert gate.evaluate(staging_cer=CER_THRESHOLD) == CIGateResult.PASS
 
     def test_fails_when_cer_above_threshold(self, gate):
-        result = gate.evaluate(staging_cer=0.20, production_cer=None)
-        assert result == CIGateResult.FAIL_CER
+        assert gate.evaluate(staging_cer=0.20) == CIGateResult.FAIL_CER
 
     def test_fails_when_cer_slightly_above_threshold(self, gate):
-        result = gate.evaluate(staging_cer=CER_THRESHOLD + 0.001, production_cer=None)
-        assert result == CIGateResult.FAIL_CER
+        assert gate.evaluate(staging_cer=CER_THRESHOLD + 0.001) == CIGateResult.FAIL_CER
 
-    def test_passes_when_staging_better_than_production(self, gate):
-        result = gate.evaluate(staging_cer=0.08, production_cer=0.10)
-        assert result == CIGateResult.PASS
+    # ── Regression = eval_loss (val) vs Production ────────────────────────────
+    def test_passes_when_loss_better_than_production(self, gate):
+        assert gate.evaluate(staging_cer=0.10, staging_loss=0.08,
+                             production_loss=0.10) == CIGateResult.PASS
 
-    def test_passes_when_staging_equal_to_production(self, gate):
-        result = gate.evaluate(staging_cer=0.10, production_cer=0.10)
-        assert result == CIGateResult.PASS
+    def test_passes_when_loss_equal_to_production(self, gate):
+        assert gate.evaluate(staging_cer=0.10, staging_loss=0.10,
+                             production_loss=0.10) == CIGateResult.PASS
 
     def test_passes_within_regression_tolerance(self, gate):
-        # staging=0.104 <= production=0.10 * 1.05 = 0.105 → PASS
-        result = gate.evaluate(staging_cer=0.104, production_cer=0.10)
-        assert result == CIGateResult.PASS
+        # staging_loss=0.104 <= production_loss=0.10 * 1.05 = 0.105 → PASS
+        assert gate.evaluate(staging_cer=0.10, staging_loss=0.104,
+                             production_loss=0.10) == CIGateResult.PASS
 
-    def test_fails_when_regresses_beyond_tolerance(self, gate):
-        # staging=0.12 > production=0.10 * 1.05 = 0.105 → FAIL_REGRESSION
-        result = gate.evaluate(staging_cer=0.12, production_cer=0.10)
-        assert result == CIGateResult.FAIL_REGRESSION
+    def test_fails_when_loss_regresses_beyond_tolerance(self, gate):
+        # staging_loss=0.12 > 0.10 * 1.05 = 0.105 → FAIL_REGRESSION
+        assert gate.evaluate(staging_cer=0.10, staging_loss=0.12,
+                             production_loss=0.10) == CIGateResult.FAIL_REGRESSION
 
     def test_fail_cer_takes_priority_over_regression(self, gate):
-        # staging=0.20 > threshold AND regresses — CER check fires first
-        result = gate.evaluate(staging_cer=0.20, production_cer=0.10)
-        assert result == CIGateResult.FAIL_CER
+        # cer above threshold AND loss regresses — CER check fires first
+        assert gate.evaluate(staging_cer=0.20, staging_loss=0.12,
+                             production_loss=0.10) == CIGateResult.FAIL_CER
 
-    def test_no_production_skips_regression_check(self, gate):
-        result = gate.evaluate(staging_cer=0.10, production_cer=None)
-        assert result == CIGateResult.PASS
+    def test_no_production_loss_skips_regression(self, gate):
+        # loss would regress, but no Production loss → regression skipped → PASS
+        assert gate.evaluate(staging_cer=0.10, staging_loss=0.99,
+                             production_loss=None) == CIGateResult.PASS
+
+    def test_missing_staging_loss_skips_regression(self, gate):
+        assert gate.evaluate(staging_cer=0.10, staging_loss=None,
+                             production_loss=0.10) == CIGateResult.PASS
 
     def test_result_is_enum_type(self, gate):
-        result = gate.evaluate(staging_cer=0.10, production_cer=None)
-        assert isinstance(result, CIGateResult)
+        assert isinstance(gate.evaluate(staging_cer=0.10), CIGateResult)
 
 
 class TestCIGateMLflowTransitions:
