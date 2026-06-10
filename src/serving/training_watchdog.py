@@ -33,10 +33,13 @@ _EXPERIMENT = "ocr-training"
 _POLL_INTERVAL_S = int(os.environ.get("WATCHDOG_POLL_INTERVAL_S", "60"))
 _GRACE_CHECKS = int(os.environ.get("WATCHDOG_GRACE_CHECKS", "3"))   # consecutive
 _MAX_RETRIES = int(os.environ.get("WATCHDOG_MAX_RETRIES", "3"))     # per run
-# After triggering a recovery, give the new instance time to provision + pull the
-# image before health-checking again (else we'd spam recover while it boots).
+# After triggering recovery we wait for the run's vast_instance_id tag to change
+# to the NEW instance before health-checking again — so we monitor the new box,
+# never the old dead one. If provisioning never completes within this window
+# (e.g. no offer found, recover_error), we stop waiting and re-evaluate (which
+# may re-trigger, consuming a retry, or eventually hit the retry cap).
 _READY_TIMEOUT_S = int(os.environ.get("VAST_READY_TIMEOUT_S", "900"))
-_RECOVERY_COOLDOWN_S = _READY_TIMEOUT_S + 120
+_PROVISION_TIMEOUT_S = _READY_TIMEOUT_S + 300
 
 _API_BASE = os.environ.get("WATCHDOG_API_BASE", "http://fastapi:8000")
 _VAST_API_KEY = os.environ.get("VAST_API_KEY", "")
@@ -84,7 +87,9 @@ def run_forever() -> None:
 
     fail_count: dict[str, int] = {}
     retry_count: dict[str, int] = {}
-    cooldown_until: dict[str, float] = {}
+    # While a recovery provisions, remember the dead instance we replaced and
+    # when — we wait for the tag to point at a NEW instance, then monitor that.
+    awaiting: dict[str, tuple[str, float]] = {}  # rid -> (old_instance_id, since)
 
     while True:
         try:
@@ -101,8 +106,25 @@ def run_forever() -> None:
                 iid = run.data.tags.get("vast_instance_id")
                 if not iid:
                     continue  # still on its first boot — no tag yet, skip
-                if time.time() < cooldown_until.get(rid, 0):
-                    continue  # a recovery is provisioning; don't re-check yet
+
+                # A recovery for this run is in flight: wait for the new instance.
+                pend = awaiting.get(rid)
+                if pend is not None:
+                    old_iid, since = pend
+                    if iid != old_iid:
+                        # tag now points at the freshly provisioned instance →
+                        # resume monitoring IT (recover again if it dies too)
+                        print(f"[watchdog] {rid[:8]} new instance {iid} up → resuming "
+                              f"monitoring", flush=True)
+                        awaiting.pop(rid)
+                        fail_count[rid] = 0
+                    elif time.time() - since > _PROVISION_TIMEOUT_S:
+                        print(f"[watchdog] {rid[:8]} provisioning stuck "
+                              f"(>{_PROVISION_TIMEOUT_S}s, still {old_iid}) → re-evaluating",
+                              flush=True)
+                        awaiting.pop(rid)  # fall through, may re-trigger / hit cap
+                    else:
+                        continue  # still provisioning the replacement — keep waiting
 
                 state = _instance_state(iid)
                 if state == "running":
@@ -134,10 +156,12 @@ def run_forever() -> None:
                 if ok:
                     retry_count[rid] = retry_count.get(rid, 0) + 1
                     fail_count[rid] = 0
-                    cooldown_until[rid] = time.time() + _RECOVERY_COOLDOWN_S
+                    # Wait for the tag to change to the new instance before the
+                    # next health check (so we follow the new box, not the old one).
+                    awaiting[rid] = (iid, time.time())
 
             # Drop bookkeeping for runs no longer RUNNING
-            for d in (fail_count, retry_count, cooldown_until):
+            for d in (fail_count, retry_count, awaiting):
                 for rid in list(d):
                     if rid not in active:
                         d.pop(rid, None)
