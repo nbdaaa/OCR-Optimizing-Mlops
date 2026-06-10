@@ -95,19 +95,24 @@ python -m src.training.train {args}
 
 
 def _provision_and_train(
-    run_id: str, data_version: str, init_adapter_version: str | None, hyperparams: dict
+    run_id: str, data_version: str, init_adapter_version: str | None,
+    hyperparams: dict, gpu_template_id: str | None = None,
 ) -> None:
     """
     Background task: provision a Vast.ai GPU instance whose onstart script
     clones the repo, installs deps, and runs train.py with the pre-created
     run_id. Tags the MLflow run with the Vast instance id (for logs/status).
     Logs flow to MLflow + W&B; raw stdout to Vast logs.
+
+    gpu_template_id: per-request offer ID; falls back to env, then auto-select.
     """
     from src.serving.scaler import AutoScaler, ScalerConfig
 
+    # request offer ID > env GPU_TRAIN_TEMPLATE_ID > "" (auto-select)
+    offer = (gpu_template_id or os.environ.get("GPU_TRAIN_TEMPLATE_ID", "") or "").strip()
     cfg = ScalerConfig(
         vast_api_key=os.environ["VAST_API_KEY"],
-        gpu_template_id=os.environ.get("GPU_TRAIN_TEMPLATE_ID", ""),  # ""→auto-select
+        gpu_template_id=offer,
         nginx_upstream_conf="",   # unused for training
         state_file="",            # unused for training
     )
@@ -165,7 +170,7 @@ def trigger_training(
     }
     background_tasks.add_task(
         _provision_and_train, run_id, request.data_version,
-        request.init_adapter_version, hyperparams,
+        request.init_adapter_version, hyperparams, request.gpu_template_id,
     )
     return TriggerTrainingResponse(job_id=run_id)
 

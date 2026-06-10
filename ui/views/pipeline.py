@@ -96,6 +96,7 @@ elif section == _TRAIN:
         st.subheader("Trigger a training job")
         dv = st.selectbox("Data version", data_versions) if data_versions else st.text_input("Data version")
         init_v = st.selectbox("Warm-start from model version", ["latest (default)"] + model_versions)
+        gpu_offer = st.text_input("GPU offer ID (để trống = env / auto-select)", placeholder="vd 39903270")
         c1, c2, c3, c4 = st.columns(4)
         epochs = c1.number_input("num_epochs", min_value=1, value=None, step=1)
         batch = c2.number_input("batch_size", min_value=1, value=None, step=1)
@@ -107,6 +108,8 @@ elif section == _TRAIN:
         body = {"data_version": dv}
         if init_v and not init_v.startswith("latest"):
             body["init_adapter_version"] = init_v
+        if gpu_offer.strip():
+            body["gpu_template_id"] = gpu_offer.strip()
         if epochs is not None: body["num_epochs"] = int(epochs)
         if batch is not None:  body["batch_size"] = int(batch)
         if grad is not None:   body["grad_accum"] = int(grad)

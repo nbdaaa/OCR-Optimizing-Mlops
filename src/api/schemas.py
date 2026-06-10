@@ -43,6 +43,8 @@ class VersionListResponse(BaseModel):
 class TriggerTrainingRequest(BaseModel):
     data_version: str
     init_adapter_version: str | None = None   # continual warm-start; None = latest
+    # Vast.ai offer ID to pin a specific machine; None/empty → env default or auto-select
+    gpu_template_id: str | None = None
     # Optional hyperparameter overrides (None → use TrainConfig defaults)
     num_epochs: int | None = None
     batch_size: int | None = None
