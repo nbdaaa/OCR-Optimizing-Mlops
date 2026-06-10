@@ -192,6 +192,10 @@ elif section == _TRAIN:
                     time.sleep(2)
                     ok_s, s2 = api_get(f"/training/{job_id}/status")
                     running = ok_s and s2.get("status") == "running"
+                    # Re-read ssh target each poll so logs follow a NEW instance
+                    # after a recover re-provisions (tags get overwritten).
+                    if ok_s and s2.get("ssh_host") and s2.get("ssh_port"):
+                        ssh_host, ssh_port = s2["ssh_host"], s2["ssh_port"]
             else:
                 st.caption("Instance chưa provisioned xong — log sẽ stream khi sẵn sàng.")
 
