@@ -340,11 +340,11 @@ def recover_job(
 
     if action == "DONE":
         # Already registered but the run may be stuck RUNNING → terminate so the
-        # watchdog stops monitoring it.
+        # watchdog stops monitoring it. Don't swallow silently — surface failures.
         try:
             client.set_terminated(job_id, status="FINISHED")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[recover] set_terminated failed for {job_id}: {exc}", flush=True)
         return RecoverResponse(job_id=job_id, action=action, provisioned=False)
 
     if action == "REGISTER_ONLY":
@@ -354,8 +354,8 @@ def recover_job(
         register_adapter(job_id, config=cfg)
         try:
             client.set_terminated(job_id, status="FINISHED")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[recover] set_terminated failed for {job_id}: {exc}", flush=True)
         return RecoverResponse(job_id=job_id, action=action, provisioned=False)
 
     # FINALIZE / RESUME_TRAIN → need a GPU instance
