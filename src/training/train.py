@@ -402,6 +402,19 @@ def train(
         mlflow.log_params({**cfg.as_mlflow_params(), "data_version": data_version, "smoke_test": smoke_test})
         mlflow.set_tag("wandb_url", wandb.run.get_url())
 
+        # Durable checkpoints: upload each saved checkpoint's contents to MLflow
+        # artifacts under "checkpoint/" (overwrites → only latest kept) + tag the
+        # step, so a new instance can resume after the current one dies.
+        from transformers import TrainerCallback
+
+        class _CkptUploader(TrainerCallback):
+            def on_save(self, args, state, control, **kw):
+                ck = os.path.join(output_dir, f"checkpoint-{state.global_step}")
+                if os.path.isdir(ck):
+                    c = mlflow.MlflowClient()
+                    c.log_artifacts(run_id, ck, artifact_path="checkpoint")
+                    c.set_tag(run_id, "last_checkpoint_step", str(state.global_step))
+
         print(f"[train] starting training (smoke_test={smoke_test}, "
               f"resume={resume_from_checkpoint}) ...", flush=True)
         trainer = Trainer(
@@ -410,8 +423,10 @@ def train(
             train_dataset=hf_dataset,
             eval_dataset=hf_dataset,
             data_collator=DataCollatorForOCR(processor, cfg),
+            callbacks=[_CkptUploader()],
         )
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+        mlflow.set_tag("training_complete", "true")
         print(f"[train] training done, saving adapter ...", flush=True)
 
         if trainer.state.log_history:
@@ -441,28 +456,139 @@ def train(
                       f"CER on TRAIN data (biased)", flush=True)
 
         print(f"[train] computing CER ...", flush=True)
-        cer = evaluate_cer(
-            model, processor, bench_df, cfg,
-            n_samples=1 if smoke_test else None,   # None → full benchmark
-            max_new_tokens=64 if smoke_test else None,
-        )
-        mlflow.log_metric("cer", cer)
-        print(f"[train] CER = {cer:.4f}", flush=True)
+        try:
+            cer = evaluate_cer(
+                model, processor, bench_df, cfg,
+                n_samples=1 if smoke_test else None,   # None → full benchmark
+                max_new_tokens=64 if smoke_test else None,
+            )
+            mlflow.log_metric("cer", cer)
+            print(f"[train] CER = {cer:.4f}", flush=True)
+        except Exception as exc:  # noqa: BLE001 — don't lose the run if CER fails
+            print(f"[train] CER eval failed (still registering): {exc}", flush=True)
 
     wandb.finish()
     register_adapter(run_id, config=cfg)
     return run_id
 
 
+# ── Recovery (stage-aware resume) ─────────────────────────────────────────────
+
+def _has_artifact(client, run_id: str, path: str) -> bool:
+    try:
+        return len(client.list_artifacts(run_id, path)) > 0
+    except Exception:
+        return False
+
+
+def resolve_recovery_action(client, cfg: TrainConfig, run_id: str) -> str:
+    """
+    Decide where a dead run should resume from, by inspecting MLflow state:
+      DONE          — a model version is already registered for this run
+      REGISTER_ONLY — cer logged but not registered yet → just register
+      FINALIZE      — training finished (adapter artifact / training_complete tag)
+                      but no cer → load adapter, compute CER, register (no retrain)
+      RESUME_TRAIN  — died mid-training → resume from the durable checkpoint
+    """
+    versions = client.search_model_versions(f"name='{cfg.model_name}'")
+    if any(v.run_id == run_id for v in versions):
+        return "DONE"
+    run = client.get_run(run_id)
+    if "cer" in run.data.metrics:
+        return "REGISTER_ONLY"
+    if run.data.tags.get("training_complete") == "true" or _has_artifact(client, run_id, "adapter"):
+        return "FINALIZE"
+    return "RESUME_TRAIN"
+
+
+def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConfig | None = None) -> str:
+    """
+    Resume a dead run from the right stage (see resolve_recovery_action).
+    Reuses durable artifacts (adapter / checkpoint) saved under the SAME run_id.
+    """
+    import torch
+    from peft import PeftModel
+    from transformers import AutoProcessor
+    try:
+        from transformers import AutoModelForImageTextToText as AutoVLM
+    except ImportError:
+        from transformers import AutoModelForVision2Seq as AutoVLM
+
+    cfg = config or TrainConfig()
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("MINIO_ACCESS_KEY", ""))
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", ""))
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+    client = mlflow.MlflowClient()
+
+    action = resolve_recovery_action(client, cfg, run_id)
+    print(f"[recover] run {run_id[:8]} → action = {action}", flush=True)
+
+    if action == "DONE":
+        print("[recover] already registered — nothing to do.", flush=True)
+        return run_id
+
+    if action == "REGISTER_ONLY":
+        register_adapter(run_id, config=cfg)
+        print("[recover] registered to Staging.", flush=True)
+        return run_id
+
+    if action == "FINALIZE":
+        hf_token = os.environ.get("HF_TOKEN")
+        processor = AutoProcessor.from_pretrained(cfg.base_model, token=hf_token)
+        model = AutoVLM.from_pretrained(
+            cfg.base_model, torch_dtype=torch.bfloat16, device_map="auto", token=hf_token,
+        )
+        adapter_dir = os.path.join(output_dir, "_recover_adapter")
+        os.makedirs(adapter_dir, exist_ok=True)
+        local = client.download_artifacts(run_id, "adapter", adapter_dir)
+        model = PeftModel.from_pretrained(model, local)
+        model.eval()
+        print("[recover] FINALIZE: loaded adapter, computing CER on benchmark …", flush=True)
+        try:
+            bench_df = load_dataset_from_minio(os.environ.get("BENCHMARK_VERSION", "benchmark"), config=cfg)
+            cer = evaluate_cer(model, processor, bench_df, cfg)
+            client.log_metric(run_id, "cer", cer)
+            print(f"[recover] CER = {cer:.4f}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[recover] CER failed (still registering): {exc}", flush=True)
+        register_adapter(run_id, config=cfg)
+        print("[recover] registered to Staging.", flush=True)
+        return run_id
+
+    # RESUME_TRAIN — download the durable checkpoint and continue training, using
+    # the SAME run_id and the original hyperparameters (read from run params).
+    run = client.get_run(run_id)
+    p = run.data.params
+    data_version = p.get("data_version")
+    if p.get("epochs"):     cfg.num_epochs = int(p["epochs"])
+    if p.get("batch_size"): cfg.batch_size = int(p["batch_size"])
+    if p.get("grad_accum"): cfg.grad_accum = int(p["grad_accum"])
+    if p.get("lr"):         cfg.learning_rate = float(p["lr"])
+
+    ckpt_dir = os.path.join(output_dir, "_resume_ckpt")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    local = client.download_artifacts(run_id, "checkpoint", ckpt_dir)
+    print(f"[recover] RESUME_TRAIN: resuming from checkpoint {local}", flush=True)
+    return train(
+        data_version, output_dir=output_dir, config=cfg,
+        run_id=run_id, resume_from_checkpoint=local,
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-version", required=True)
+    parser.add_argument("--data-version", default=None)
     parser.add_argument("--output-dir", default="/tmp/ocr-adapter")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--run-id", default=None, help="Resume an existing MLflow run")
     parser.add_argument(
         "--resume", action="store_true",
         help="Resume training from the latest checkpoint in --output-dir",
+    )
+    parser.add_argument(
+        "--recover", action="store_true",
+        help="Stage-aware recovery of a dead run (needs --run-id): resume train / "
+             "finalize CER / register, decided from MLflow state.",
     )
     parser.add_argument(
         "--init-adapter-version", default=None,
@@ -485,12 +611,19 @@ if __name__ == "__main__":
     if args.learning_rate is not None:
         cfg.learning_rate = args.learning_rate
 
-    print(train(
-        args.data_version,
-        args.output_dir,
-        args.smoke_test,
-        config=cfg,
-        run_id=args.run_id,
-        resume_from_checkpoint=args.resume,
-        init_adapter_version=args.init_adapter_version,
-    ))
+    if args.recover:
+        if not args.run_id:
+            parser.error("--recover requires --run-id")
+        print(recover(args.run_id, output_dir=args.output_dir, config=cfg))
+    else:
+        if not args.data_version:
+            parser.error("--data-version is required (unless --recover)")
+        print(train(
+            args.data_version,
+            args.output_dir,
+            args.smoke_test,
+            config=cfg,
+            run_id=args.run_id,
+            resume_from_checkpoint=args.resume,
+            init_adapter_version=args.init_adapter_version,
+        ))
