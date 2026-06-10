@@ -540,6 +540,7 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
 
     if action == "REGISTER_ONLY":
         register_adapter(run_id, config=cfg)
+        client.set_terminated(run_id, status="FINISHED")  # leave RUNNING → watchdog stops
         print("[recover] registered to Staging.", flush=True)
         return run_id
 
@@ -563,6 +564,7 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
         except Exception as exc:  # noqa: BLE001
             print(f"[recover] CER failed (still registering): {exc}", flush=True)
         register_adapter(run_id, config=cfg)
+        client.set_terminated(run_id, status="FINISHED")  # leave RUNNING → watchdog stops
         print("[recover] registered to Staging.", flush=True)
         return run_id
 

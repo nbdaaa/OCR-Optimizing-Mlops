@@ -339,6 +339,12 @@ def recover_job(
     action = resolve_recovery_action(client, cfg, job_id)
 
     if action == "DONE":
+        # Already registered but the run may be stuck RUNNING → terminate so the
+        # watchdog stops monitoring it.
+        try:
+            client.set_terminated(job_id, status="FINISHED")
+        except Exception:  # noqa: BLE001
+            pass
         return RecoverResponse(job_id=job_id, action=action, provisioned=False)
 
     if action == "REGISTER_ONLY":
@@ -346,6 +352,10 @@ def recover_job(
         os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("MINIO_ACCESS_KEY", ""))
         os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", ""))
         register_adapter(job_id, config=cfg)
+        try:
+            client.set_terminated(job_id, status="FINISHED")
+        except Exception:  # noqa: BLE001
+            pass
         return RecoverResponse(job_id=job_id, action=action, provisioned=False)
 
     # FINALIZE / RESUME_TRAIN → need a GPU instance

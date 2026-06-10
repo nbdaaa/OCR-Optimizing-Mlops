@@ -130,6 +130,33 @@ services:
     networks:
       - backend
 
+  # ── Training watchdog (auto-recovery for dead train instances) ─────────────
+  training-watchdog:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    restart: unless-stopped
+    command: ["python", "-m", "src.serving.training_watchdog"]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      VAST_API_KEY: ${VAST_API_KEY}
+      WATCHDOG_API_BASE: http://fastapi:8000
+      WATCHDOG_POLL_INTERVAL_S: ${WATCHDOG_POLL_INTERVAL_S:-60}
+      WATCHDOG_GRACE_CHECKS: ${WATCHDOG_GRACE_CHECKS:-3}
+      WATCHDOG_MAX_RETRIES: ${WATCHDOG_MAX_RETRIES:-3}
+      VAST_READY_TIMEOUT_S: ${VAST_READY_TIMEOUT_S:-900}
+    volumes:
+      - ../src:/app/src:ro
+    networks:
+      - backend
+
   # ── Nginx Load Balancer ───────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
