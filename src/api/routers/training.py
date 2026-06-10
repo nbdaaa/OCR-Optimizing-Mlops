@@ -21,6 +21,8 @@ from src.api.schemas import (
     TrainingLogsResponse,
     TrainingJobBrief,
     TrainingJobsResponse,
+    RecoverRequest,
+    RecoverResponse,
 )
 from src.serving.scaler import _VAST_BASE
 
@@ -131,6 +133,47 @@ def _provision_and_train(
         c.set_tag(run_id, "vast_ssh_port", instance.get("ssh_port", ""))
     except Exception as exc:
         mlflow.MlflowClient().set_tag(run_id, "provision_error", str(exc))
+        raise
+
+
+def _provision_and_recover(run_id: str, gpu_template_id: str | None) -> None:
+    """Background task: provision an instance whose onstart runs train.py --recover
+    --run-id <run_id> (stage-aware resume). Re-tags the instance on the same run."""
+    from src.serving.scaler import AutoScaler, ScalerConfig
+
+    work_dir = os.environ.get("REMOTE_WORK_DIR", "/workspace/OCR-Optimizing-Mlops")
+    git_repo = os.environ["GIT_REPO_URL"]
+    onstart = f"""#!/bin/bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+command -v git >/dev/null || (apt-get update && apt-get install -y git)
+rm -rf {work_dir}
+git clone --branch dev {git_repo} {work_dir}
+cd {work_dir}
+pip install -q -r requirements-train.txt
+cat > .env <<'ENVEOF'
+{_build_env_block()}
+ENVEOF
+python -m src.training.train --recover --run-id {run_id}
+"""
+    offer = (gpu_template_id or os.environ.get("GPU_TRAIN_TEMPLATE_ID", "") or "").strip()
+    cfg = ScalerConfig(
+        vast_api_key=os.environ["VAST_API_KEY"],
+        gpu_template_id=offer,
+        nginx_upstream_conf="",
+        state_file="",
+    )
+    train_image = os.environ.get(
+        "TRAIN_DOCKER_IMAGE", "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel"
+    )
+    try:
+        instance = AutoScaler(cfg)._create_vast_instance(image=train_image, onstart=onstart)
+        c = mlflow.MlflowClient()
+        c.set_tag(run_id, "vast_instance_id", instance["id"])
+        c.set_tag(run_id, "vast_ssh_host", instance.get("ssh_host", ""))
+        c.set_tag(run_id, "vast_ssh_port", instance.get("ssh_port", ""))
+    except Exception as exc:
+        mlflow.MlflowClient().set_tag(run_id, "recover_error", str(exc))
         raise
 
 
@@ -268,3 +311,46 @@ def get_training_logs(job_id: str, tail: int = 200, client=Depends(get_mlflow_cl
                 break
 
     return TrainingLogsResponse(job_id=job_id, instance_id=instance_id, logs=logs)
+
+
+@router.post("/{job_id}/recover", response_model=RecoverResponse)
+def recover_job(
+    job_id: str,
+    request: RecoverRequest,
+    background_tasks: BackgroundTasks,
+    client=Depends(get_mlflow_client),
+):
+    """
+    Manually recover a dead run (stage-aware). Resolver runs server-side:
+      - DONE          → nothing to do
+      - REGISTER_ONLY → register here (no GPU needed)
+      - FINALIZE / RESUME_TRAIN → provision a GPU instance running --recover
+    gpu_template_id lets you pin a machine (useful when auto-select finds none).
+    """
+    from src.training.config import TrainConfig
+    from src.training.train import register_adapter, resolve_recovery_action
+
+    try:
+        client.get_run(job_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+    cfg = TrainConfig()
+    action = resolve_recovery_action(client, cfg, job_id)
+
+    if action == "DONE":
+        return RecoverResponse(job_id=job_id, action=action, provisioned=False)
+
+    if action == "REGISTER_ONLY":
+        # MLflow's internal boto3 may validate the artifact source → map creds
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("MINIO_ACCESS_KEY", ""))
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", ""))
+        register_adapter(job_id, config=cfg)
+        return RecoverResponse(job_id=job_id, action=action, provisioned=False)
+
+    # FINALIZE / RESUME_TRAIN → need a GPU instance
+    for var in ("VAST_API_KEY", "GIT_REPO_URL"):
+        if not os.environ.get(var):
+            raise HTTPException(status_code=503, detail=f"{var} not configured")
+    background_tasks.add_task(_provision_and_recover, job_id, request.gpu_template_id)
+    return RecoverResponse(job_id=job_id, action=action, provisioned=True)

@@ -84,6 +84,16 @@ class TrainingJobsResponse(BaseModel):
     jobs: list[TrainingJobBrief]
 
 
+class RecoverRequest(BaseModel):
+    gpu_template_id: str | None = None   # pin a machine for the recovery instance
+
+
+class RecoverResponse(BaseModel):
+    job_id: str
+    action: str          # DONE | REGISTER_ONLY | FINALIZE | RESUME_TRAIN
+    provisioned: bool    # True if a GPU instance was launched to finish recovery
+
+
 # ── Model registry ────────────────────────────────────────────────────────────
 
 class ModelVersionInfo(BaseModel):

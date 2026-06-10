@@ -154,6 +154,23 @@ elif section == _TRAIN:
             if status.get("metrics"):
                 st.json(status["metrics"])
 
+            with st.expander("🛟 Recover (instance chết / job kẹt)"):
+                st.caption("Resume từ đúng stage (tự quyết): REGISTER_ONLY / FINALIZE / "
+                           "RESUME_TRAIN. Để trống offer ID = env/auto; điền nếu auto-select "
+                           "không tìm được máy.")
+                rec_offer = st.text_input("GPU offer ID", key="recover_offer",
+                                          placeholder="vd 39903270 (tùy chọn)")
+                if st.button("🛟 Recover job"):
+                    body = {}
+                    if rec_offer.strip():
+                        body["gpu_template_id"] = rec_offer.strip()
+                    ok_r, res_r = api_post(f"/training/{job_id}/recover", json=body)
+                    if ok_r:
+                        prov = "đã thuê instance" if res_r["provisioned"] else "xử lý tại server (không cần GPU)"
+                        st.success(f"action = {res_r['action']} · {prov}")
+                    else:
+                        st.error(res_r)
+
             st.subheader("Live logs")
             ssh_host, ssh_port = status.get("ssh_host"), status.get("ssh_port")
             if ssh_host and ssh_port:
