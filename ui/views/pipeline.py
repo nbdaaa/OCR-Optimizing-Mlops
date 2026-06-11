@@ -252,10 +252,16 @@ elif section == _SERVE:
     c1, c2, c3 = st.columns([1, 1, 2])
     if c1.button("🚀 Deploy", use_container_width=True):
         ok, res = api_post("/deploy/trigger")
-        st.success("Deploy requested — pool đang khởi động (~1.5-2 phút).") if ok else st.error(res)
+        if ok:
+            st.success("Deploy requested — pool đang khởi động (~1.5-2 phút).")
+        else:
+            st.error(res)
     if c2.button("🛑 Teardown", use_container_width=True):
         ok, res = api_post("/deploy/teardown")
-        st.warning("Teardown requested — đang stop toàn bộ instance.") if ok else st.error(res)
+        if ok:
+            st.warning("Teardown requested — đang stop toàn bộ instance.")
+        else:
+            st.error(res)
     auto = c3.toggle("Tự refresh trạng thái (3s)", value=False)
 
     ok_s, status = api_get("/deploy/status")
