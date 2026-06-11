@@ -128,20 +128,20 @@ class CIGateResponse(BaseModel):
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
-class TriggerDeployRequest(BaseModel):
-    model_version: int | None = None   # None = use current Production
+class DeployControlResponse(BaseModel):
+    desired_floor: int        # 1 = deployed (pool min 1, autoscale 1↔2), 0 = sleep
+    status: str               # deploying | active | starting | sleeping | tearing_down | ...
 
 
-class TriggerDeployResponse(BaseModel):
-    instance_id: str
-    address: str
-
-
-class InstanceInfo(BaseModel):
-    instance_id: str
-    address: str
-    status: str
+class PoolInstance(BaseModel):
+    name: str
+    tunnel_url: str | None = None
+    ready: bool = False
+    age_s: int = 0
 
 
 class DeployStatusResponse(BaseModel):
-    instances: list[InstanceInfo]
+    desired_floor: int
+    status: str
+    lb_url: str = ""
+    instances: list[PoolInstance] = []

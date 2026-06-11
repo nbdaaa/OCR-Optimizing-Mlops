@@ -109,26 +109,42 @@ def _queue(url: str) -> float | None:
 
 # ── State + nginx ─────────────────────────────────────────────────────────────
 
+def _read_state() -> dict:
+    try:
+        return json.load(open(STATE_FILE))
+    except Exception:
+        return {}
+
+
 def _read_floor() -> int:
     try:
-        return int(json.load(open(STATE_FILE)).get("desired_floor", 0))
+        return int(_read_state().get("desired_floor", 0))
     except Exception:
         return 0
 
 
-def _write_state(instances: list[Instance], floor: int, status: str) -> None:
+def _set_floor(n: int) -> None:
+    """Persist desired_floor (used by auto-sleep; FastAPI /deploy owns it otherwise)."""
+    st = _read_state()
+    st["desired_floor"] = n
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    json.dump({
-        "desired_floor": floor,
-        "status": status,
-        "lb_url": os.environ.get("PUBLIC_LB_URL", ""),
-        "instances": [
-            {"name": i.name, "tunnel_url": i.tunnel_url,
-             "ready": bool(i.tunnel_url), "age_s": int(time.time() - i.started_at)}
-            for i in instances
-        ],
-        "updated_at": int(time.time()),
-    }, open(STATE_FILE, "w"), indent=2)
+    json.dump(st, open(STATE_FILE, "w"), indent=2)
+
+
+def _write_status(instances: list[Instance], status: str) -> None:
+    """Write pool status WITHOUT clobbering desired_floor (re-read + preserve)."""
+    st = _read_state()
+    st["desired_floor"] = int(st.get("desired_floor", 0))
+    st["status"] = status
+    st["lb_url"] = os.environ.get("PUBLIC_LB_URL", "")
+    st["instances"] = [
+        {"name": i.name, "tunnel_url": i.tunnel_url,
+         "ready": bool(i.tunnel_url), "age_s": int(time.time() - i.started_at)}
+        for i in instances
+    ]
+    st["updated_at"] = int(time.time())
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    json.dump(st, open(STATE_FILE, "w"), indent=2)
 
 
 def _write_nginx(ready_urls: list[str]) -> None:
@@ -212,7 +228,7 @@ def main() -> None:
                     instances = []
                     _write_nginx([])
                     print("[pool] floor=0 → all stopped", flush=True)
-                _write_state(instances, 0, "sleeping")
+                _write_status(instances, "sleeping")
                 time.sleep(POLL_S)
                 continue
 
@@ -224,13 +240,14 @@ def main() -> None:
                     _stop(inst)
                 instances = []
                 _write_nginx([])
-                _write_state(instances, 0, "launch_failed")
+                _set_floor(0)
+                _write_status(instances, "launch_failed")
                 time.sleep(POLL_S)
                 continue
 
             # in backoff window after a failure → wait
             if time.time() < blocked_until:
-                _write_state(instances, floor, "backoff")
+                _write_status(instances, "backoff")
                 time.sleep(POLL_S)
                 continue
 
@@ -239,7 +256,7 @@ def main() -> None:
                 instances.append(_launch("pool-1"))
                 last_scale = time.time()
                 last_activity = time.time()
-                _write_state(instances, floor, "starting")
+                _write_status(instances, "starting")
                 time.sleep(POLL_S)
                 continue
 
@@ -267,13 +284,14 @@ def main() -> None:
 
             elif len(instances) == 1 and idle > AUTO_SLEEP_IDLE_S:
                 _stop(instances.pop())
-                floor = 0   # persist auto-sleep so it stays down until next Deploy
+                _set_floor(0)   # persist auto-sleep so it stays down until next Deploy
+                floor = 0
                 print(f"[pool] AUTO-SLEEP → 0 (idle {int(idle)}s)", flush=True)
 
             ready = [i for i in instances if i.tunnel_url]
             _write_nginx([i.tunnel_url for i in ready])
             status = "active" if ready else ("sleeping" if floor == 0 else "starting")
-            _write_state(instances, floor, status)
+            _write_status(instances, status)
 
         except Exception as exc:  # noqa: BLE001 — daemon must not die
             print(f"[pool] loop error: {exc}", flush=True)
