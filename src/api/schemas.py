@@ -136,6 +136,7 @@ class DeployControlResponse(BaseModel):
 class PoolInstance(BaseModel):
     name: str
     tunnel_url: str | None = None
+    adapter: str | None = None     # which adapter version this instance serves
     ready: bool = False
     age_s: int = 0
 

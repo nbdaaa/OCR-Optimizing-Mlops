@@ -55,6 +55,7 @@ class Instance:
     log_path: str
     started_at: float
     tunnel_url: str | None = None
+    adapter: str | None = None      # which adapter version this instance loaded
 
 
 # ── Colab session control ─────────────────────────────────────────────────────
@@ -62,23 +63,36 @@ class Instance:
 def _launch(name: str) -> Instance:
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = f"{LOG_DIR}/{name}.log"
+    # Pass MLflow/MinIO config so launch_vllm.py pulls the Production adapter.
+    # Empty values → launch falls back to its pinned HF adapter.
+    extra = [
+        os.environ.get("PUBLIC_MLFLOW_TRACKING_URI", ""),
+        os.environ.get("PUBLIC_MINIO_ENDPOINT", ""),
+        os.environ.get("MINIO_ACCESS_KEY", ""),
+        os.environ.get("MINIO_SECRET_KEY", ""),
+    ]
     cmd = [COLAB, "--auth", "adc", "run", "--gpu", GPU, "--keep",
-           "-s", name, "--timeout", SESSION_TIMEOUT, LAUNCH, HF_TOKEN]
+           "-s", name, "--timeout", SESSION_TIMEOUT, LAUNCH, HF_TOKEN, *extra]
     proc = subprocess.Popen(cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT)
     print(f"[pool] launching {name} (gpu={GPU})", flush=True)
     return Instance(name=name, proc=proc, log_path=log_path, started_at=time.time())
 
 
 def _resolve_tunnel(inst: Instance) -> None:
-    if inst.tunnel_url:
-        return
     try:
-        m = _TUNNEL_RE.search(open(inst.log_path).read())
+        log = open(inst.log_path).read()
+    except FileNotFoundError:
+        return
+    if inst.adapter is None:
+        a = re.search(r"ADAPTER=(.+)", log)
+        if a:
+            inst.adapter = a.group(1).strip()
+    if not inst.tunnel_url:
+        m = _TUNNEL_RE.search(log)
         if m:
             inst.tunnel_url = m.group(0)
-            print(f"[pool] {inst.name} ready → {inst.tunnel_url}", flush=True)
-    except FileNotFoundError:
-        pass
+            print(f"[pool] {inst.name} ready → {inst.tunnel_url} "
+                  f"(adapter: {inst.adapter})", flush=True)
 
 
 def _stop(inst: Instance) -> None:
@@ -138,7 +152,7 @@ def _write_status(instances: list[Instance], status: str) -> None:
     st["status"] = status
     st["lb_url"] = os.environ.get("PUBLIC_LB_URL", "")
     st["instances"] = [
-        {"name": i.name, "tunnel_url": i.tunnel_url,
+        {"name": i.name, "tunnel_url": i.tunnel_url, "adapter": i.adapter,
          "ready": bool(i.tunnel_url), "age_s": int(time.time() - i.started_at)}
         for i in instances
     ]
