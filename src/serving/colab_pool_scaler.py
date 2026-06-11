@@ -176,6 +176,8 @@ def main() -> None:
     instances: list[Instance] = []
     last_scale = 0.0
     last_activity = time.time()
+    fail_count = 0          # consecutive launch failures
+    blocked_until = 0.0     # backoff: don't launch before this time
     print(f"[pool] scaler started · max={POOL_MAX} up_q={SCALE_UP_QUEUE} "
           f"down_idle={SCALE_DOWN_IDLE_S}s sleep_idle={AUTO_SLEEP_IDLE_S}s "
           f"cooldown={COOLDOWN_S}s", flush=True)
@@ -196,6 +198,12 @@ def main() -> None:
                           flush=True)
                     _stop(inst)
                     instances.remove(inst)
+                    fail_count += 1
+                    blocked_until = time.time() + min(30 * fail_count, 300)
+
+            # any healthy instance → reset the failure backoff
+            if any(i.tunnel_url for i in instances):
+                fail_count = 0
 
             if floor == 0:
                 if instances:
@@ -205,6 +213,24 @@ def main() -> None:
                     _write_nginx([])
                     print("[pool] floor=0 → all stopped", flush=True)
                 _write_state(instances, 0, "sleeping")
+                time.sleep(POLL_S)
+                continue
+
+            # floor >= 1 but launches keep failing → give up, go to sleep
+            if fail_count >= 5:
+                print("[pool] too many launch failures → floor=0 "
+                      "(check colab CLI / launch_vllm.py path / ADC)", flush=True)
+                for inst in instances:
+                    _stop(inst)
+                instances = []
+                _write_nginx([])
+                _write_state(instances, 0, "launch_failed")
+                time.sleep(POLL_S)
+                continue
+
+            # in backoff window after a failure → wait
+            if time.time() < blocked_until:
+                _write_state(instances, floor, "backoff")
                 time.sleep(POLL_S)
                 continue
 
