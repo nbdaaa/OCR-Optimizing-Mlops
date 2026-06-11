@@ -54,9 +54,9 @@ def _ssh_tail(host: str, port: str, lines: int = 400) -> tuple[bool, str]:
 
 st.title("🎛️ Pipeline Actions")
 
-_DATA, _TRAIN, _GATE = "🗂️ Data", "🏋️ Training", "✅ CI/CD Gate"
+_DATA, _TRAIN, _GATE, _SERVE = "🗂️ Data", "🏋️ Training", "✅ CI/CD Gate", "🚀 Serving"
 section = st.segmented_control(
-    "Section", [_DATA, _TRAIN, _GATE], default=_TRAIN, label_visibility="collapsed"
+    "Section", [_DATA, _TRAIN, _GATE, _SERVE], default=_TRAIN, label_visibility="collapsed"
 )
 
 # ── Data: create a version ────────────────────────────────────────────────────
@@ -242,3 +242,50 @@ elif section == _GATE:
             pl = res.get("production_loss")
             d1.metric("Staging eval_loss", f"{sl:.4f}" if sl is not None else "—")
             d2.metric("Production eval_loss", f"{pl:.4f}" if pl is not None else "—")
+
+# ── Serving: deploy / teardown the Colab pool + status ────────────────────────
+elif section == _SERVE:
+    st.subheader("Serving (Colab pool)")
+    st.caption("Deploy bật pool (min 1, tự co giãn 1↔2 theo tải, tự ngủ sau 10' rảnh). "
+               "Inference gọi qua LB URL bên dưới (OpenAI-compatible /v1/chat/completions).")
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    if c1.button("🚀 Deploy", use_container_width=True):
+        ok, res = api_post("/deploy/trigger")
+        st.success("Deploy requested — pool đang khởi động (~1.5-2 phút).") if ok else st.error(res)
+    if c2.button("🛑 Teardown", use_container_width=True):
+        ok, res = api_post("/deploy/teardown")
+        st.warning("Teardown requested — đang stop toàn bộ instance.") if ok else st.error(res)
+    auto = c3.toggle("Tự refresh trạng thái (3s)", value=False)
+
+    ok_s, status = api_get("/deploy/status")
+    if not ok_s:
+        st.error(status)
+    else:
+        badge = {"active": "🟢", "starting": "🟡", "deploying": "🟡", "backoff": "🟡",
+                 "sleeping": "⚪", "tearing_down": "🟠", "launch_failed": "🔴"}
+        sstat = status.get("status", "unknown")
+        floor = status.get("desired_floor", 0)
+        st.write(f"{badge.get(sstat, '⚪')} **{sstat}** · desired_floor={floor}")
+
+        lb = status.get("lb_url")
+        if lb:
+            st.markdown(f"**LB endpoint:** `{lb}/v1/chat/completions`  ·  [{lb}]({lb})")
+
+        instances = status.get("instances", [])
+        if instances:
+            st.dataframe(
+                [{"name": i["name"],
+                  "ready": "✅" if i.get("ready") else "⏳",
+                  "adapter": i.get("adapter") or "—",
+                  "age (s)": i.get("age_s"),
+                  "tunnel": i.get("tunnel_url") or "—"}
+                 for i in instances],
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("Chưa có instance nào (pool đang ngủ hoặc khởi động).")
+
+    if auto:
+        time.sleep(3)
+        st.rerun()
