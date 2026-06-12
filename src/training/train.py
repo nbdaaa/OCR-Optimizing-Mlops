@@ -515,9 +515,13 @@ def train(
                 if key in last:
                     mlflow.log_metric(key, last[key])
 
-        model.save_pretrained(output_dir)
-        processor.save_pretrained(output_dir)
-        mlflow.log_artifacts(output_dir, artifact_path="adapter")
+        # Log ONLY the LoRA adapter (adapter_config.json + adapter_model.safetensors
+        # ~23MB) to the "adapter" artifact — NOT the whole output_dir, which also
+        # holds training checkpoints (was ~700MB → slow to pull at deploy time).
+        # Durable checkpoints are logged separately under "checkpoint/" (resume).
+        adapter_dir = os.path.join(output_dir, "_adapter")
+        model.save_pretrained(adapter_dir)
+        mlflow.log_artifacts(adapter_dir, artifact_path="adapter")
 
         # Generate-based CER on the fixed held-out benchmark → metric the CI
         # gate reads. Evaluating on a separate benchmark (not train data) avoids
