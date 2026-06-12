@@ -9,6 +9,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# MLflow experiment names. Phase-1 (normal text+loc) training → EXPERIMENT_TRAIN;
+# phase-2 bbox-refinement curriculum (mask_mode="bbox") → EXPERIMENT_POST, so the
+# two phases are easy to tell apart in the MLflow UI. The control plane (API
+# router) and the watchdog both consult BOTH names, so phase-2 jobs still appear
+# in the job tracker and are still recovered if their instance dies.
+EXPERIMENT_TRAIN = "ocr-training"
+EXPERIMENT_POST = "post-training"
+
+
+def experiment_for(mask_mode: str | None) -> str:
+    """Route a run to its MLflow experiment based on its mask mode."""
+    return EXPERIMENT_POST if mask_mode == "bbox" else EXPERIMENT_TRAIN
+
 
 @dataclass
 class TrainConfig:

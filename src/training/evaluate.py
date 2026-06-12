@@ -94,3 +94,45 @@ def compute_batch_cer(predictions: list[str], ground_truths: list[str]) -> float
             f"Length mismatch: {len(predictions)} predictions vs {len(ground_truths)} ground_truths"
         )
     return sum(compute_cer(p, g) for p, g in zip(predictions, ground_truths)) / len(predictions)
+
+
+# ── Bounding-box (loc) accuracy ───────────────────────────────────────────────
+
+_LOC_RE = re.compile(r"<loc_(\d+)>")
+
+
+def extract_locs(text: str) -> list[int]:
+    """Return all <loc_N> integer values in document order."""
+    return [int(v) for v in _LOC_RE.findall(text)]
+
+
+def compute_loc_mae(
+    predictions: list[str], ground_truths: list[str]
+) -> tuple[float, float]:
+    """
+    Mean Absolute Error (in loc units, 0–500 grid) between predicted and
+    ground-truth <loc_N> sequences, plus loc-count coverage.
+
+    Loc values are aligned by position (docling emits elements in reading
+    order), comparing up to the shorter of the two sequences per sample. This
+    drifts if the model emits a different number of elements — coverage
+    (pred_locs / gt_locs) flags how reliable the MAE is.
+
+    Returns:
+        (mae, coverage). mae = float("nan") if no loc pairs were comparable.
+    """
+    total_err = 0.0
+    matched = 0
+    gt_total = 0
+    pred_total = 0
+    for pred, gt in zip(predictions, ground_truths):
+        pl, gl = extract_locs(pred), extract_locs(gt)
+        gt_total += len(gl)
+        pred_total += len(pl)
+        n = min(len(pl), len(gl))
+        for i in range(n):
+            total_err += abs(pl[i] - gl[i])
+            matched += 1
+    mae = (total_err / matched) if matched else float("nan")
+    coverage = (pred_total / gt_total) if gt_total else float("nan")
+    return mae, coverage

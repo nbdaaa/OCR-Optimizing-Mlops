@@ -25,6 +25,7 @@ from src.api.schemas import (
     RecoverResponse,
 )
 from src.serving.scaler import _VAST_BASE
+from src.training.config import EXPERIMENT_POST, EXPERIMENT_TRAIN, experiment_for
 
 router = APIRouter(prefix="/training", tags=["training"])
 
@@ -34,8 +35,6 @@ _STATUS_MAP = {
     "FAILED":   "failed",
     "KILLED":   "failed",
 }
-
-_EXPERIMENT = "ocr-training"
 
 # Vars forwarded to the remote .env unchanged (same name + value).
 # WANDB_ENTITY intentionally NOT forwarded — let wandb resolve the API key's
@@ -228,7 +227,8 @@ def trigger_training(
             raise HTTPException(status_code=503, detail=f"{var} not configured")
 
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
-    experiment = mlflow.set_experiment(_EXPERIMENT)
+    # bbox phase → "post-training" experiment, normal → "ocr-training".
+    experiment = mlflow.set_experiment(experiment_for(request.mask_mode))
     run = client.create_run(
         experiment_id=experiment.experiment_id,
         run_name=f"train-{request.data_version}",
@@ -240,6 +240,9 @@ def trigger_training(
         "--batch-size":   request.batch_size,
         "--grad-accum":   request.grad_accum,
         "--learning-rate": request.learning_rate,
+        # "bbox" → phase-2 curriculum (loss only on loc + structure tokens). None
+        # falls through to train.py's "all" default, so existing triggers are unchanged.
+        "--mask-mode":    request.mask_mode,
     }
     background_tasks.add_task(
         _provision_and_train, run_id, request.data_version,
@@ -250,18 +253,24 @@ def trigger_training(
 
 @router.get("/jobs", response_model=TrainingJobsResponse)
 def list_jobs(client=Depends(get_mlflow_client)):
-    """List recent training runs (job_id = run_id) in the ocr-training experiment,
-    newest first — so the UI can find a running job from any session."""
-    exp = client.get_experiment_by_name(_EXPERIMENT)
-    if exp is None:
+    """List recent training runs (job_id = run_id) across BOTH the ocr-training
+    (phase 1) and post-training (phase 2 bbox) experiments, newest first — so the
+    UI finds a running job from any session regardless of which phase it is."""
+    exp_ids = [
+        e.experiment_id
+        for name in (EXPERIMENT_TRAIN, EXPERIMENT_POST)
+        if (e := client.get_experiment_by_name(name)) is not None
+    ]
+    if not exp_ids:
         return TrainingJobsResponse(jobs=[])
-    runs = client.search_runs([exp.experiment_id], max_results=50)
+    runs = client.search_runs(exp_ids, max_results=50)
     runs = sorted(runs, key=lambda r: r.info.start_time or 0, reverse=True)
     jobs = [
         TrainingJobBrief(
             job_id=r.info.run_id,
             status=_STATUS_MAP.get(r.info.status, r.info.status.lower()),
             data_version=r.data.params.get("data_version"),
+            mask_mode=r.data.params.get("mask_mode"),
         )
         for r in runs
     ]

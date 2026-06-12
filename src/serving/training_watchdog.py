@@ -2,7 +2,8 @@
 Training watchdog — auto-recovery for dead training instances (Phase 2 / B).
 
 A long-lived daemon (separate from the API, like the autoscaler) that:
-  1. Lists MLflow runs still in RUNNING state in the ocr-training experiment.
+  1. Lists MLflow runs still in RUNNING state across the ocr-training (phase 1)
+     and post-training (phase 2 bbox) experiments.
   2. For each run that has a `vast_instance_id` tag (set ONLY after the instance
      first reached "running" — so a run still provisioning its FIRST boot has no
      tag yet and is skipped, never mistaken for dead), polls the Vast.ai instance.
@@ -26,8 +27,10 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("mlflow is required for the watchdog") from exc
 
 
+from src.training.config import EXPERIMENT_POST, EXPERIMENT_TRAIN
+
 _VAST_BASE = "https://console.vast.ai/api/v0"
-_EXPERIMENT = "ocr-training"
+_EXPERIMENTS = (EXPERIMENT_TRAIN, EXPERIMENT_POST)
 
 # Tunables (env-overridable)
 _POLL_INTERVAL_S = int(os.environ.get("WATCHDOG_POLL_INTERVAL_S", "60"))
@@ -93,10 +96,14 @@ def run_forever() -> None:
 
     while True:
         try:
-            exp = client.get_experiment_by_name(_EXPERIMENT)
+            exp_ids = [
+                e.experiment_id
+                for name in _EXPERIMENTS
+                if (e := client.get_experiment_by_name(name)) is not None
+            ]
             runs = client.search_runs(
-                [exp.experiment_id], "attributes.status = 'RUNNING'", max_results=100,
-            ) if exp else []
+                exp_ids, "attributes.status = 'RUNNING'", max_results=100,
+            ) if exp_ids else []
 
             active = set()
             for run in runs:

@@ -1,6 +1,47 @@
 import pytest
 
-from src.training.evaluate import compute_cer, compute_batch_cer, strip_xml_tags
+from src.training.evaluate import (
+    compute_batch_cer,
+    compute_cer,
+    compute_loc_mae,
+    extract_locs,
+    strip_xml_tags,
+)
+
+
+class TestExtractLocs:
+    def test_extracts_in_order(self):
+        s = "<text><loc_10><loc_20><loc_30><loc_40>hi</text>"
+        assert extract_locs(s) == [10, 20, 30, 40]
+
+    def test_empty_when_no_locs(self):
+        assert extract_locs("plain text no tags") == []
+
+
+class TestComputeLocMAE:
+    def test_perfect_match_zero_mae(self):
+        gt = "<text><loc_10><loc_20><loc_30><loc_40>a</text>"
+        mae, cov = compute_loc_mae([gt], [gt])
+        assert mae == pytest.approx(0.0)
+        assert cov == pytest.approx(1.0)
+
+    def test_constant_offset(self):
+        gt   = "<text><loc_10><loc_20><loc_30><loc_40>a</text>"
+        pred = "<text><loc_13><loc_23><loc_33><loc_43>a</text>"  # +3 each
+        mae, cov = compute_loc_mae([pred], [gt])
+        assert mae == pytest.approx(3.0)
+        assert cov == pytest.approx(1.0)
+
+    def test_coverage_when_pred_has_fewer_locs(self):
+        gt   = "<a><loc_0><loc_0><loc_0><loc_0></a><b><loc_5><loc_5><loc_5><loc_5></b>"
+        pred = "<a><loc_0><loc_0><loc_0><loc_0></a>"  # only 4 of 8 locs
+        mae, cov = compute_loc_mae([pred], [gt])
+        assert mae == pytest.approx(0.0)   # the 4 compared are exact
+        assert cov == pytest.approx(0.5)   # 4/8
+
+    def test_nan_when_no_comparable_locs(self):
+        mae, cov = compute_loc_mae(["no locs"], ["also none"])
+        assert mae != mae   # NaN
 
 
 class TestComputeCER:

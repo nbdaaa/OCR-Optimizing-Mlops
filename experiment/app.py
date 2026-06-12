@@ -133,8 +133,7 @@ def _render(doctags: str, img: Image.Image | None = None) -> str:
 # DocTags loc tokens are on a 0-500 normalized grid. Draw a box per element,
 # coloured by type, to mirror docling's layout visualisation (left panel).
 _BOX_RE = re.compile(r"<([a-z_0-9]+)><loc_(\d+)><loc_(\d+)><loc_(\d+)><loc_(\d+)>")
-_GRID_K = 500_000   # empirical: grid_x * W ≈ grid_y * H ≈ 500_000 across all formats/DPIs
-_NORM_W = 1240      # normalize input to this width before inference (matches training ~150dpi A4)
+_NORM_W = 1240      # normalize input to this width before inference
 _TYPE_COLORS = {
     "section_header": (220, 40, 40), "title": (220, 40, 40),
     "text": (40, 110, 215), "list_item": (40, 160, 60),
@@ -151,46 +150,57 @@ def _color(tag: str):
     return (90, 90, 90)
 
 def _annotate(img: Image.Image, doctags: str) -> Image.Image:
-    """Overlay element bounding boxes. Grid auto-derived: grid_x=500k/W, grid_y=500k/H."""
+    """Overlay bounding boxes. Formula: loc/500 * dim (verified against chandra_raw ground truth)."""
     im = img.convert("RGB").copy()
     d = ImageDraw.Draw(im)
     W, H = im.size
-    grid_x = _GRID_K / W
-    grid_y = _GRID_K / H
     seen: set = set()
     for m in _BOX_RE.finditer(doctags):
         tag = m.group(1)
         x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
         key = (x1, y1, x2, y2)
-        if key in seen:           # collapsed list_item boxes → draw the region once
+        if key in seen:
             continue
         seen.add(key)
-        box = [x1 / grid_x * W, y1 / grid_y * H, x2 / grid_x * W, y2 / grid_y * H]
-        d.rectangle(box, outline=_color(tag), width=2)
+        d.rectangle([x1/500*W, y1/500*H, x2/500*W, y2/500*H],
+                    outline=_color(tag), width=2)
     return im
 
 
 # ── Tab 1: Playground ─────────────────────────────────────────────────────────
 
 def playground(img, max_tokens, show_boxes):
+    """Run inference. Returns (vis, meta, raw, html, state)."""
     if img is None:
-        return None, "Hãy upload ảnh.", "", ""
+        return None, "Hãy upload ảnh.", "", "", None
     W_orig, H_orig = img.size
-    img_norm = _normalize(img)          # resize to training DPI before inference
+    img_norm = _normalize(img)
     try:
         doctags, dt, toks = _infer(img_norm, ADAPTER, max_tokens)
     except Exception as exc:  # noqa: BLE001
-        return None, f"Lỗi gọi serving: {exc}", "", ""
+        return None, f"Lỗi gọi serving: {exc}", "", "", None
     tps = toks / dt if dt else 0
-    W_n, H_n = img_norm.size
     meta = (f"⏱️ {dt:.1f}s · {toks} tokens · {tps:.1f} tok/s · model={ADAPTER} · "
             f"ảnh gốc {W_orig}×{H_orig}px")
+    state = {"doctags": doctags, "img_norm": img_norm, "img_orig": img}
     if show_boxes:
-        annotated = _annotate(img_norm, doctags)                    # draw on 1240px image
-        left = annotated.resize((W_orig, H_orig), Image.LANCZOS)    # scale back to original
+        annotated = _annotate(img_norm, doctags)
+        left = annotated.resize((W_orig, H_orig), Image.LANCZOS)
     else:
         left = img
-    return left, meta, doctags, _render(doctags, img)
+    return left, meta, doctags, _render(doctags, img), state
+
+def redraw(show_boxes, state):
+    """Redraw boxes on last inference result without re-running model."""
+    if not state:
+        return None
+    img_norm = state["img_norm"]
+    img_orig = state["img_orig"]
+    doctags = state["doctags"]
+    if not show_boxes:
+        return img_orig
+    annotated = _annotate(img_norm, doctags)
+    return annotated.resize(img_orig.size, Image.LANCZOS)
 
 
 # ── Tab 2: Versions ───────────────────────────────────────────────────────────
@@ -235,10 +245,11 @@ with gr.Blocks(title="OCR Experiment") as demo:
     gr.Markdown(f"# 🔬 OCR Experiment\nServing LB: `{LB_URL}` · API: `{API_BASE}`")
 
     with gr.Tab("Playground"):
+        pg_state = gr.State(None)
         with gr.Row():
             pg_img = gr.Image(type="pil", label="Ảnh tài liệu", height=300)
             pg_tok = gr.Slider(256, 4096, value=2048, step=128, label="max_tokens")
-        pg_box = gr.Checkbox(value=True, label="Hiện bounding box (grid tự động theo kích thước ảnh)")
+        pg_box = gr.Checkbox(value=True, label="Hiện bounding box")
         pg_btn = gr.Button("Convert → DocTags", variant="primary")
         pg_meta = gr.Markdown()
         with gr.Row():
@@ -251,7 +262,8 @@ with gr.Blocks(title="OCR Experiment") as demo:
         with gr.Accordion("DocTags (raw)", open=False):
             pg_raw = gr.Code(label="raw")
         pg_btn.click(playground, [pg_img, pg_tok, pg_box],
-                     [pg_boxes, pg_meta, pg_raw, pg_html])
+                     [pg_boxes, pg_meta, pg_raw, pg_html, pg_state])
+        pg_box.change(redraw, [pg_box, pg_state], [pg_boxes])
 
     with gr.Tab("Versions"):
         v_btn = gr.Button("Tải bảng version + CER", variant="primary")
@@ -277,3 +289,4 @@ with gr.Blocks(title="OCR Experiment") as demo:
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0",
                 server_port=int(os.environ.get("EXPERIMENT_PORT", "7860")))
+

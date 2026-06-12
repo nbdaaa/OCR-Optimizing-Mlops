@@ -50,6 +50,10 @@ class TriggerTrainingRequest(BaseModel):
     batch_size: int | None = None
     grad_accum: int | None = None
     learning_rate: float | None = None
+    # "bbox" → phase-2 bbox-refinement curriculum (loss only on <loc_N> + element
+    # tags). None → "all" (normal text+loc training). Pair with init_adapter_version
+    # + a low learning_rate + few num_epochs.
+    mask_mode: str | None = None
 
 
 class TriggerTrainingResponse(BaseModel):
@@ -78,6 +82,7 @@ class TrainingJobBrief(BaseModel):
     job_id: str
     status: str
     data_version: str | None = None
+    mask_mode: str | None = None   # "bbox" = phase-2 bbox-refinement run
 
 
 class TrainingJobsResponse(BaseModel):

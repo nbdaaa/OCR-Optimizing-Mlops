@@ -35,6 +35,26 @@ def _strip(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
 
 
+_LOC_RE = re.compile(r"<loc_(\d+)>")
+
+
+def _extract_locs(text: str) -> list[int]:
+    return [int(v) for v in _LOC_RE.findall(text)]
+
+
+def _loc_mae(preds: list[str], gts: list[str]) -> tuple[float, float]:
+    """Mean abs error of <loc_N> values (0–500 grid), aligned by position, + coverage."""
+    err, matched, gt_n, pred_n = 0.0, 0, 0, 0
+    for p, g in zip(preds, gts):
+        pl, gl = _extract_locs(p), _extract_locs(g)
+        gt_n += len(gl); pred_n += len(pl)
+        for i in range(min(len(pl), len(gl))):
+            err += abs(pl[i] - gl[i]); matched += 1
+    mae = (err / matched) if matched else float("nan")
+    cov = (pred_n / gt_n) if gt_n else float("nan")
+    return mae, cov
+
+
 def _img_url(field) -> str:
     """parquet image value (bytes / {'bytes':..}) → base64 data URI for vLLM.chat."""
     import base64
@@ -86,19 +106,26 @@ def main() -> None:
     llm = LLM(model=args.base_model, enable_lora=True,
               max_lora_rank=args.max_lora_rank, max_model_len=args.max_model_len,
               dtype="bfloat16", gpu_memory_utilization=0.85, trust_remote_code=True)
+    # skip_special_tokens=False keeps <loc_N>/element tags so we can score boxes;
+    # _strip removes them again for CER, so CER is unaffected.
     sp = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens,
-                        skip_special_tokens=True)
+                        skip_special_tokens=False)
     msgs = [[{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": _img_url(r["image"])}},
                 {"type": "text", "text": PROMPT}]}] for r in rows]
     print("[eval] generating (vLLM batched) ...", flush=True)
     outs = llm.chat(msgs, sp, lora_request=LoRARequest("ocr", 1, adapter_dir))
 
-    preds = [_strip(o.outputs[0].text) for o in outs]
-    gts = [_strip(r["output_text"]) for r in rows]
-    cer = float(jiwer.cer(gts, preds))
+    raw_preds = [o.outputs[0].text for o in outs]
+    raw_gts = [r["output_text"] for r in rows]
+    cer = float(jiwer.cer([_strip(g) for g in raw_gts], [_strip(p) for p in raw_preds]))
     client.log_metric(args.run_id, "cer", cer)
-    print(f"[eval] CER = {cer:.4f} (logged to run {args.run_id[:8]})", flush=True)
+
+    loc_mae, loc_cov = _loc_mae(raw_preds, raw_gts)
+    client.log_metric(args.run_id, "loc_mae", loc_mae)
+    client.log_metric(args.run_id, "loc_coverage", loc_cov)
+    print(f"[eval] CER = {cer:.4f}  loc_mae = {loc_mae:.2f}  loc_coverage = {loc_cov:.2f} "
+          f"(logged to run {args.run_id[:8]})", flush=True)
 
     # 4. self-destruct the Vast instance (job fully done)
     api_key = os.environ.get("VAST_API_KEY")

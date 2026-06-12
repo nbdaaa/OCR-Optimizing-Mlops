@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from PIL import Image
 from tqdm import tqdm
 
-from src.training.config import TrainConfig
+from src.training.config import TrainConfig, experiment_for
 
 # Load .env so MLFLOW_TRACKING_URI / MINIO_* / HF_TOKEN / WANDB_* are available
 load_dotenv()
@@ -149,15 +149,30 @@ class DataCollatorForOCR:
     """
     Formats each sample into the granite-docling chat template, tokenizes,
     then applies loss masking so only assistant (doctag) tokens contribute.
+
+    mask_mode:
+      "all"  → every assistant token contributes (text + loc + tags).
+      "bbox" → only <loc_N> + element/structure tags contribute, text content
+               is masked (phase-2 bbox-refinement curriculum).
     """
 
-    def __init__(self, processor, config: TrainConfig | None = None) -> None:
+    def __init__(
+        self, processor, config: TrainConfig | None = None, mask_mode: str = "all"
+    ) -> None:
+        from src.training.collator import build_keep_token_ids
+
         self.processor = processor
         self.max_length = (config or TrainConfig()).max_length
+        self.mask_mode = mask_mode
         boundary_text = "<|start_of_role|>assistant<|end_of_role|>"
         self._boundary_tokens: list[int] = processor.tokenizer(
             boundary_text, add_special_tokens=False
         ).input_ids
+        self._keep_ids = None
+        if mask_mode == "bbox":
+            self._keep_ids = build_keep_token_ids(processor.tokenizer)
+            print(f"[collator] mask_mode=bbox → loss on {len(self._keep_ids)} "
+                  f"loc/structure tokens only", flush=True)
 
     def __call__(self, samples: list[dict]) -> dict:
         import torch
@@ -196,7 +211,9 @@ class DataCollatorForOCR:
             batch["input_ids"].tolist(), batch["attention_mask"].tolist()
         ):
             boundary_end = find_boundary_idx(ids, self._boundary_tokens)
-            labels.append(apply_label_mask(ids, mask, boundary_end))
+            labels.append(
+                apply_label_mask(ids, mask, boundary_end, keep_only_ids=self._keep_ids)
+            )
 
         batch["labels"] = torch.tensor(labels, dtype=torch.long)
         return batch
@@ -212,18 +229,24 @@ def evaluate_cer(
     n_samples: int | None = None,
     max_new_tokens: int | None = None,
     batch_size: int | None = None,
-) -> float:
+) -> tuple[float, float, float]:
     """
-    Compute mean CER over `df` by batched generation, comparing predictions to
-    ground-truth output_text (XML tags stripped on both sides).
+    Compute (cer, loc_mae, loc_coverage) over `df` by batched generation.
 
-    Batched generation (cer_batch_size rows per generate call) is much faster
-    than one-at-a-time. Uses the KV cache (no full-sequence logits → no OOM).
+    A single generation pass feeds two metrics:
+      - CER       : XML tags stripped on both sides (text accuracy).
+      - loc_mae   : mean abs error of <loc_N> values in 0–500 units (bbox accuracy).
+      - coverage  : predicted loc count / ground-truth loc count.
+
+    Decoding uses skip_special_tokens=False so <loc_N>/element tags survive for
+    the loc metric; strip_xml_tags removes them again for CER, so CER is unchanged.
 
     n_samples=None evaluates the WHOLE df (full benchmark); otherwise df.head(n).
     """
     import torch
-    from src.training.evaluate import compute_batch_cer, strip_xml_tags
+    from src.training.evaluate import (
+        compute_batch_cer, compute_loc_mae, strip_xml_tags,
+    )
 
     cfg = config or TrainConfig()
     new_tokens = max_new_tokens or cfg.cer_max_new_tokens
@@ -244,7 +267,7 @@ def evaluate_cer(
     )
 
     rows = eval_df.to_dict("records")
-    preds, gts = [], []
+    preds_raw, gts_raw = [], []   # tags kept → for loc_mae
     for start in tqdm(range(0, len(rows), bs), desc="  CER eval", leave=False):
         batch = rows[start:start + bs]
         inputs = processor(
@@ -257,12 +280,17 @@ def evaluate_cer(
             out = model.generate(**inputs, max_new_tokens=new_tokens, do_sample=False)
         # left padding → generated tokens start uniformly after the padded prompt
         gen = out[:, inputs["input_ids"].shape[1]:]
-        decoded = processor.tokenizer.batch_decode(gen, skip_special_tokens=True)
+        decoded = processor.tokenizer.batch_decode(gen, skip_special_tokens=False)
         for r, pred in zip(batch, decoded):
-            preds.append(strip_xml_tags(pred))
-            gts.append(strip_xml_tags(r["output_text"]))
+            preds_raw.append(pred)
+            gts_raw.append(r["output_text"])
 
-    return compute_batch_cer(preds, gts)
+    cer = compute_batch_cer(
+        [strip_xml_tags(p) for p in preds_raw],
+        [strip_xml_tags(g) for g in gts_raw],
+    )
+    loc_mae, coverage = compute_loc_mae(preds_raw, gts_raw)
+    return cer, loc_mae, coverage
 
 
 # ── Loss evaluation (teacher-forced cross-entropy on the benchmark) ───────────
@@ -273,6 +301,7 @@ def evaluate_loss(
     df: pd.DataFrame,
     config: TrainConfig | None = None,
     batch_size: int | None = None,
+    mask_mode: str = "all",
 ) -> float:
     """
     Mean teacher-forced cross-entropy over `df`, using the SAME label masking as
@@ -281,13 +310,16 @@ def evaluate_loss(
     which differs between versions → not comparable). The CI gate's regression
     check reads this (logged as 'benchmark_loss').
 
+    mask_mode matches the training run so the logged loss is comparable to what
+    was optimised ("bbox" → loc/structure-only CE for the phase-2 curriculum).
+
     Forward-with-labels only (no generation) → cheap; right padding like training.
     """
     import torch
 
     cfg = config or TrainConfig()
     bs = batch_size or cfg.batch_size
-    collator = DataCollatorForOCR(processor, cfg)
+    collator = DataCollatorForOCR(processor, cfg, mask_mode=mask_mode)
 
     processor.tokenizer.padding_side = "right"
     model.eval()
@@ -392,6 +424,7 @@ def train(
     resume_from_checkpoint: bool = False,
     init_adapter_version: str | None = None,
     defer_eval: bool = False,
+    mask_mode: str = "all",
 ) -> str:
     # defer_eval=True: skip the slow in-process CER generate AND skip self-destruct
     # — a separate vLLM eval phase (eval_cer_vllm.py) computes CER on this same
@@ -424,7 +457,9 @@ def train(
     os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", ""))
 
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
-    mlflow.set_experiment("ocr-training")
+    # Standalone CLI runs (no pre-created run_id) land here; bbox phase → post-training.
+    # When run_id is passed (API path), start_run uses that run's existing experiment.
+    mlflow.set_experiment(experiment_for(mask_mode))
 
     hf_token = os.environ.get("HF_TOKEN")
 
@@ -483,7 +518,8 @@ def train(
 
     with mlflow.start_run(run_id=run_id, run_name=f"train-{data_version}") as run:
         run_id = run.info.run_id
-        mlflow.log_params({**cfg.as_mlflow_params(), "data_version": data_version, "smoke_test": smoke_test})
+        mlflow.log_params({**cfg.as_mlflow_params(), "data_version": data_version,
+                           "smoke_test": smoke_test, "mask_mode": mask_mode})
         mlflow.set_tag("wandb_url", wandb.run.get_url())
 
         # Durable checkpoints: upload each saved checkpoint's contents to MLflow
@@ -506,7 +542,7 @@ def train(
             args=build_training_args(output_dir, cfg, smoke_test=smoke_test),
             train_dataset=hf_dataset,
             eval_dataset=eval_dataset,
-            data_collator=DataCollatorForOCR(processor, cfg),
+            data_collator=DataCollatorForOCR(processor, cfg, mask_mode=mask_mode),
             callbacks=[_CkptUploader()],
         )
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
@@ -548,27 +584,30 @@ def train(
         # flips the model to left-padding + generation.
         print(f"[train] computing benchmark loss ...", flush=True)
         try:
-            bench_loss = evaluate_loss(model, processor, bench_df, cfg)
+            bench_loss = evaluate_loss(model, processor, bench_df, cfg, mask_mode=mask_mode)
             mlflow.log_metric("benchmark_loss", bench_loss)
             print(f"[train] benchmark_loss = {bench_loss:.4f}", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[train] benchmark loss failed: {exc}", flush=True)
 
         if defer_eval:
-            # CER computed later by the vLLM eval phase (much faster than the
-            # transformers generate loop). benchmark_loss already logged above.
+            # CER + loc_mae computed later by the vLLM eval phase (much faster than
+            # the transformers generate loop). benchmark_loss already logged above.
             print("[train] defer_eval=True → skipping in-process CER "
                   "(vLLM eval phase will compute it)", flush=True)
         else:
-            print(f"[train] computing CER ...", flush=True)
+            print(f"[train] computing CER + loc_mae ...", flush=True)
             try:
-                cer = evaluate_cer(
+                cer, loc_mae, loc_cov = evaluate_cer(
                     model, processor, bench_df, cfg,
                     n_samples=1 if smoke_test else None,   # None → full benchmark
                     max_new_tokens=64 if smoke_test else None,
                 )
                 mlflow.log_metric("cer", cer)
-                print(f"[train] CER = {cer:.4f}", flush=True)
+                mlflow.log_metric("loc_mae", loc_mae)
+                mlflow.log_metric("loc_coverage", loc_cov)
+                print(f"[train] CER = {cer:.4f}  loc_mae = {loc_mae:.2f}  "
+                      f"loc_coverage = {loc_cov:.2f}", flush=True)
             except Exception as exc:  # noqa: BLE001 — don't lose the run if CER fails
                 print(f"[train] CER eval failed (still registering): {exc}", flush=True)
 
@@ -665,9 +704,11 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
                 print(f"[recover] benchmark_loss = {bench_loss:.4f}", flush=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[recover] benchmark loss failed: {exc}", flush=True)
-            cer = evaluate_cer(model, processor, bench_df, cfg)
+            cer, loc_mae, loc_cov = evaluate_cer(model, processor, bench_df, cfg)
             client.log_metric(run_id, "cer", cer)
-            print(f"[recover] CER = {cer:.4f}", flush=True)
+            client.log_metric(run_id, "loc_mae", loc_mae)
+            client.log_metric(run_id, "loc_coverage", loc_cov)
+            print(f"[recover] CER = {cer:.4f}  loc_mae = {loc_mae:.2f}", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[recover] eval failed (still registering): {exc}", flush=True)
         register_adapter(run_id, config=cfg)
@@ -685,6 +726,7 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
     if p.get("batch_size"): cfg.batch_size = int(p["batch_size"])
     if p.get("grad_accum"): cfg.grad_accum = int(p["grad_accum"])
     if p.get("lr"):         cfg.learning_rate = float(p["lr"])
+    mask_mode = p.get("mask_mode", "all")
 
     ckpt_dir = os.path.join(output_dir, "_resume_ckpt")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -692,7 +734,7 @@ def recover(run_id: str, output_dir: str = "/tmp/ocr-adapter", config: TrainConf
     print(f"[recover] RESUME_TRAIN: resuming from checkpoint {local}", flush=True)
     return train(
         data_version, output_dir=output_dir, config=cfg,
-        run_id=run_id, resume_from_checkpoint=local,
+        run_id=run_id, resume_from_checkpoint=local, mask_mode=mask_mode,
     )
 
 
@@ -719,6 +761,12 @@ if __name__ == "__main__":
         "--defer-eval", action="store_true",
         help="Skip in-process CER + self-destruct; a separate vLLM eval phase "
              "computes CER on the same instance after this process exits.",
+    )
+    parser.add_argument(
+        "--mask-mode", choices=["all", "bbox"], default="all",
+        help="Loss masking. 'all' = text+loc+tags (default). 'bbox' = loss only on "
+             "<loc_N> + element tags (phase-2 bbox-refinement; pair with low --learning-rate "
+             "and few --num-epochs, warm-started via --init-adapter-version).",
     )
     # Optional hyperparameter overrides (default → TrainConfig values)
     parser.add_argument("--num-epochs", type=int, default=None)
@@ -753,4 +801,5 @@ if __name__ == "__main__":
             resume_from_checkpoint=args.resume,
             init_adapter_version=args.init_adapter_version,
             defer_eval=args.defer_eval,
+            mask_mode=args.mask_mode,
         ))
