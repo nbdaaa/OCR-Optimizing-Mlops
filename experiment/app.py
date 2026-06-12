@@ -78,8 +78,11 @@ def _fix_vn(text: str) -> str:
 
 _RENDER_CSS = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,400;0,700;1,400&display=swap');
+/* Noto Serif / Times New Roman have FULL Vietnamese glyphs; Georgia does NOT
+   (it renders Ố/Ế/Ầ as base+detached mark) — that was the "PHỐ´" bug. */
 .doc-render{max-width:820px;margin:0 auto;padding:32px 40px;background:#fff;color:#1a1a1a;
-  font-family:Georgia,'Times New Roman',serif;line-height:1.55;box-shadow:0 1px 6px rgba(0,0,0,.15);}
+  font-family:'Noto Serif','Times New Roman',serif;line-height:1.55;box-shadow:0 1px 6px rgba(0,0,0,.15);}
 .doc-render h1{font-size:1.5em;font-weight:700;margin:.2em 0 .6em;}
 .doc-render h2,.doc-render h3{font-weight:700;margin:1em 0 .4em;}
 .doc-render p{margin:.5em 0;text-align:justify;}
@@ -157,7 +160,7 @@ def _annotate(img: Image.Image, doctags: str) -> Image.Image:
 
 # ── Tab 1: Playground ─────────────────────────────────────────────────────────
 
-def playground(img, max_tokens):
+def playground(img, max_tokens, show_boxes):
     if img is None:
         return None, "Hãy upload ảnh.", "", ""
     try:
@@ -166,7 +169,8 @@ def playground(img, max_tokens):
         return None, f"Lỗi gọi serving: {exc}", "", ""
     tps = toks / dt if dt else 0
     meta = f"⏱️ {dt:.1f}s · {toks} tokens · {tps:.1f} tok/s · model={ADAPTER}"
-    return _annotate(img, doctags), meta, doctags, _render(doctags, img)
+    left = _annotate(img, doctags) if show_boxes else img
+    return left, meta, doctags, _render(doctags, img)
 
 
 # ── Tab 2: Versions ───────────────────────────────────────────────────────────
@@ -214,18 +218,19 @@ with gr.Blocks(title="OCR Experiment") as demo:
         with gr.Row():
             pg_img = gr.Image(type="pil", label="Ảnh tài liệu", height=300)
             pg_tok = gr.Slider(256, 4096, value=2048, step=128, label="max_tokens")
+        pg_box = gr.Checkbox(value=True, label="Hiện bounding box (xấp xỉ)")
         pg_btn = gr.Button("Convert → DocTags", variant="primary")
         pg_meta = gr.Markdown()
         with gr.Row():
             with gr.Column():
-                gr.Markdown("#### Layout (bounding boxes theo loại)")
-                pg_boxes = gr.Image(label="Annotated", height=720)
+                gr.Markdown("#### Layout")
+                pg_boxes = gr.Image(label="Ảnh", height=720)
             with gr.Column():
                 gr.Markdown("#### Rendered")
                 pg_html = gr.HTML()
         with gr.Accordion("DocTags (raw)", open=False):
             pg_raw = gr.Code(label="raw")
-        pg_btn.click(playground, [pg_img, pg_tok],
+        pg_btn.click(playground, [pg_img, pg_tok, pg_box],
                      [pg_boxes, pg_meta, pg_raw, pg_html])
 
     with gr.Tab("Versions"):
