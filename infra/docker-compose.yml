@@ -180,7 +180,9 @@ services:
     restart: unless-stopped
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/targets.json:/etc/prometheus/targets.json
+      # targets.json written by the host scaler (colab_pool_scaler.py) as the
+      # vLLM pool scales up/down — shared via /opt/ocr.
+      - /opt/ocr/prometheus/targets.json:/etc/prometheus/targets.json
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

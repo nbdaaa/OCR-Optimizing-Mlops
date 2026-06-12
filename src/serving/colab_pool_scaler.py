@@ -41,6 +41,7 @@ SESSION_TIMEOUT   = os.environ.get("COLAB_SESSION_TIMEOUT", "21600")
 STATE_FILE        = os.environ.get("SERVE_STATE_FILE", "/opt/ocr/serve_state.json")
 NGINX_CONF        = os.environ.get("NGINX_LB_CONF", "/opt/ocr/nginx/ocr_lb.conf")
 NGINX_CONTAINER   = os.environ.get("NGINX_CONTAINER", "infra-nginx-1")
+PROM_TARGETS      = os.environ.get("PROM_TARGETS_FILE", "/opt/ocr/prometheus/targets.json")
 COLAB             = os.environ.get("COLAB_CLI", "colab")
 LOG_DIR           = os.environ.get("POOL_LOG_DIR", "/opt/ocr/logs")
 READY_GIVEUP_S    = int(os.environ.get("READY_GIVEUP_S", "600"))      # kill instance if no tunnel in time
@@ -200,6 +201,19 @@ def _write_nginx(ready_urls: list[str]) -> None:
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _write_prometheus_targets(ready: list[Instance]) -> None:
+    """Write Prometheus file_sd targets (observability only — NOT the scale loop).
+    Each ready instance's CF-tunnel host:443 with its pool name as a label.
+    Prometheus picks this up via refresh_interval (no reload needed)."""
+    targets = [
+        {"targets": [i.tunnel_url.replace("https://", "").rstrip("/") + ":443"],
+         "labels": {"instance": i.name, "adapter": i.adapter or "unknown"}}
+        for i in ready if i.tunnel_url
+    ]
+    os.makedirs(os.path.dirname(PROM_TARGETS), exist_ok=True)
+    json.dump(targets, open(PROM_TARGETS, "w"), indent=2)
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -241,6 +255,7 @@ def main() -> None:
                         _stop(inst)
                     instances = []
                     _write_nginx([])
+                    _write_prometheus_targets([])
                     print("[pool] floor=0 → all stopped", flush=True)
                 _write_status(instances, "sleeping")
                 time.sleep(POLL_S)
@@ -254,6 +269,7 @@ def main() -> None:
                     _stop(inst)
                 instances = []
                 _write_nginx([])
+                _write_prometheus_targets([])
                 _set_floor(0)
                 _write_status(instances, "launch_failed")
                 time.sleep(POLL_S)
@@ -304,6 +320,7 @@ def main() -> None:
 
             ready = [i for i in instances if i.tunnel_url]
             _write_nginx([i.tunnel_url for i in ready])
+            _write_prometheus_targets(ready)
             status = "active" if ready else ("sleeping" if floor == 0 else "starting")
             _write_status(instances, status)
 

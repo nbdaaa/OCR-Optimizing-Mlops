@@ -4,8 +4,12 @@ global:
 
 scrape_configs:
   - job_name: vllm
+    # vLLM instances run on Colab behind Cloudflare quick tunnels (HTTPS:443).
+    # Targets written dynamically by colab_pool_scaler.py as instances scale
+    # up/down; file_sd refresh picks them up without a reload.
+    scheme: https
+    metrics_path: /metrics
     file_sd_configs:
       - files:
           - /etc/prometheus/targets.json
         refresh_interval: 15s
-    metrics_path: /metrics
