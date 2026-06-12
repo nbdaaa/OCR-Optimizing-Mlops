@@ -51,6 +51,10 @@ def main():
     ap.add_argument("--repo", default="nbdaaa/all-ocr-data")
     ap.add_argument("--file", default="data/train-00000-of-00064.parquet")
     ap.add_argument("--row", type=int, default=0)
+    # Per-axis grids derived from ground-truth analysis (NOT 500). Tune these so
+    # boxes align, then lock the values that work across several rows.
+    ap.add_argument("--grid-x", type=float, default=345.0)
+    ap.add_argument("--grid-y", type=float, default=293.0)
     args = ap.parse_args()
 
     from huggingface_hub import hf_hub_download
@@ -77,18 +81,23 @@ def main():
         after = doctags[m.end():m.end() + 60].split("<")[0].strip()
         print(f"    {tag:24s} {x1:3d},{y1:3d},{x2:3d},{y2:3d}  | {after[:40]}")
 
-    for scheme in ("per-axis", "square-topleft", "square-centered"):
-        im = img.copy()
-        d = ImageDraw.Draw(im)
-        for m in _BOX_RE.finditer(doctags):
-            tag = m.group(1)
-            x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
-            ax, ay = _map(x1, y1, W, H, scheme)
-            bx, by = _map(x2, y2, W, H, scheme)
-            d.rectangle([ax, ay, bx, by], outline=_color(tag), width=3)
-        out = f"box_{scheme}.png"
-        im.save(out)
-        print(f"  saved {out}")
+    # Fitted per-axis grid (the promising approach): x_px = loc_x/grid_x * W, etc.
+    im = img.copy()
+    d = ImageDraw.Draw(im)
+    seen = set()
+    for m in _BOX_RE.finditer(doctags):
+        tag = m.group(1)
+        x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
+        key = (x1, y1, x2, y2)
+        if key in seen:          # collapsed list_item boxes → draw once
+            continue
+        seen.add(key)
+        box = [x1 / args.grid_x * W, y1 / args.grid_y * H,
+               x2 / args.grid_x * W, y2 / args.grid_y * H]
+        d.rectangle(box, outline=_color(tag), width=3)
+    out = f"box_fitted_gx{int(args.grid_x)}_gy{int(args.grid_y)}.png"
+    im.save(out)
+    print(f"  saved {out}  (grid_x={args.grid_x}, grid_y={args.grid_y})")
 
 if __name__ == "__main__":
     main()
