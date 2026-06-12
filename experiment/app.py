@@ -142,34 +142,34 @@ def _color(tag: str):
             return col
     return (90, 90, 90)
 
-def _map_xy(lx, ly, W, H, scheme):
-    """Map a 0-500 loc point to pixels under the chosen normalization scheme."""
-    if scheme == "per-axis":            # docling default (no padding)
-        return lx / 500 * W, ly / 500 * H
-    S = max(W, H)
-    if scheme == "square top-left":     # image padded into a square at (0,0)
-        return lx / 500 * S, ly / 500 * S
-    # "square centered": image centered in the square (pad both sides)
-    return lx / 500 * S - (S - W) / 2, ly / 500 * S - (S - H) / 2
+# loc → pixel mapping uses per-axis grids (NOT 500). Calibrated on ground-truth
+# training samples: this dataset's loc are normalized with different effective
+# grids per axis. Tunable live in the UI.
+GRID_X_DEFAULT = 345.0
+GRID_Y_DEFAULT = 293.0
 
-
-def _annotate(img: Image.Image, doctags: str, scheme: str = "per-axis") -> Image.Image:
-    """Overlay element bounding boxes (coloured by type) using the given scheme."""
+def _annotate(img: Image.Image, doctags: str,
+              grid_x: float = GRID_X_DEFAULT, grid_y: float = GRID_Y_DEFAULT) -> Image.Image:
+    """Overlay element bounding boxes (coloured by type). x_px=loc_x/grid_x*W."""
     im = img.convert("RGB").copy()
     d = ImageDraw.Draw(im)
     W, H = im.size
+    seen = set()
     for m in _BOX_RE.finditer(doctags):
         tag = m.group(1)
         x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
-        ax, ay = _map_xy(x1, y1, W, H, scheme)
-        bx, by = _map_xy(x2, y2, W, H, scheme)
-        d.rectangle([ax, ay, bx, by], outline=_color(tag), width=2)
+        key = (x1, y1, x2, y2)
+        if key in seen:           # collapsed list_item boxes → draw the region once
+            continue
+        seen.add(key)
+        box = [x1 / grid_x * W, y1 / grid_y * H, x2 / grid_x * W, y2 / grid_y * H]
+        d.rectangle(box, outline=_color(tag), width=2)
     return im
 
 
 # ── Tab 1: Playground ─────────────────────────────────────────────────────────
 
-def playground(img, max_tokens, show_boxes, scheme):
+def playground(img, max_tokens, show_boxes, grid_x, grid_y):
     if img is None:
         return None, "Hãy upload ảnh.", "", ""
     try:
@@ -179,8 +179,8 @@ def playground(img, max_tokens, show_boxes, scheme):
     tps = toks / dt if dt else 0
     W, H = img.size
     meta = (f"⏱️ {dt:.1f}s · {toks} tokens · {tps:.1f} tok/s · model={ADAPTER} · "
-            f"ảnh {W}×{H}px · box scheme: {scheme}")
-    left = _annotate(img, doctags, scheme) if show_boxes else img
+            f"ảnh {W}×{H}px · grid {grid_x:g}/{grid_y:g}")
+    left = _annotate(img, doctags, grid_x, grid_y) if show_boxes else img
     return left, meta, doctags, _render(doctags, img)
 
 
@@ -231,9 +231,8 @@ with gr.Blocks(title="OCR Experiment") as demo:
             pg_tok = gr.Slider(256, 4096, value=2048, step=128, label="max_tokens")
         with gr.Row():
             pg_box = gr.Checkbox(value=True, label="Hiện bounding box")
-            pg_scheme = gr.Dropdown(
-                ["per-axis", "square top-left", "square centered"],
-                value="per-axis", label="Box scheme (chọn cái khớp nhất)")
+            pg_gx = gr.Number(value=GRID_X_DEFAULT, label="grid_x (giảm → box rộng hơn)")
+            pg_gy = gr.Number(value=GRID_Y_DEFAULT, label="grid_y (giảm → box cao hơn)")
         pg_btn = gr.Button("Convert → DocTags", variant="primary")
         pg_meta = gr.Markdown()
         with gr.Row():
@@ -245,7 +244,7 @@ with gr.Blocks(title="OCR Experiment") as demo:
                 pg_html = gr.HTML()
         with gr.Accordion("DocTags (raw)", open=False):
             pg_raw = gr.Code(label="raw")
-        pg_btn.click(playground, [pg_img, pg_tok, pg_box, pg_scheme],
+        pg_btn.click(playground, [pg_img, pg_tok, pg_box, pg_gx, pg_gy],
                      [pg_boxes, pg_meta, pg_raw, pg_html])
 
     with gr.Tab("Versions"):
