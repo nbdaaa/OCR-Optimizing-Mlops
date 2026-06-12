@@ -62,9 +62,20 @@ def main():
     doctags = row["output_text"]
     W, H = img.size
 
-    xs = [int(v) for m in _BOX_RE.finditer(doctags) for v in m.groups()[1:]]
-    print(f"image {W}x{H}px · loc count {len(list(_BOX_RE.finditer(doctags)))} · "
-          f"loc range x/y min={min(xs) if xs else '-'} max={max(xs) if xs else '-'}")
+    elems = list(_BOX_RE.finditer(doctags))
+    xs_all = [int(v) for m in elems for v in m.groups()[1:]]
+    # split x vs y to see their ranges separately (key for per-axis vs square)
+    xvals = [int(m.group(2)) for m in elems] + [int(m.group(4)) for m in elems]
+    yvals = [int(m.group(3)) for m in elems] + [int(m.group(5)) for m in elems]
+    print(f"image {W}x{H}px · {len(elems)} elems")
+    print(f"  loc X range: {min(xvals)}..{max(xvals)}   loc Y range: {min(yvals)}..{max(yvals)}")
+    print("  per-element (tag | loc x1,y1,x2,y2 | text):")
+    for m in elems[:12]:
+        tag = m.group(1)
+        x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
+        # text right after the 4th loc, up to next tag
+        after = doctags[m.end():m.end() + 60].split("<")[0].strip()
+        print(f"    {tag:24s} {x1:3d},{y1:3d},{x2:3d},{y2:3d}  | {after[:40]}")
 
     for scheme in ("per-axis", "square-topleft", "square-centered"):
         im = img.copy()
