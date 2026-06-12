@@ -36,6 +36,13 @@ PROMPT      = "Convert this page to docling format."
 
 # ── inference ─────────────────────────────────────────────────────────────────
 
+def _normalize(img: Image.Image) -> Image.Image:
+    """Resize to _NORM_W width (keep aspect ratio) — matches training DPI distribution."""
+    w, h = img.size
+    if w == _NORM_W:
+        return img.convert("RGB")
+    return img.convert("RGB").resize((_NORM_W, round(h * _NORM_W / w)), Image.LANCZOS)
+
 def _data_uri(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG")
@@ -127,6 +134,7 @@ def _render(doctags: str, img: Image.Image | None = None) -> str:
 # coloured by type, to mirror docling's layout visualisation (left panel).
 _BOX_RE = re.compile(r"<([a-z_0-9]+)><loc_(\d+)><loc_(\d+)><loc_(\d+)><loc_(\d+)>")
 _GRID_K = 500_000   # empirical: grid_x * W ≈ grid_y * H ≈ 500_000 across all formats/DPIs
+_NORM_W = 1240      # normalize input to this width before inference (matches training ~150dpi A4)
 _TYPE_COLORS = {
     "section_header": (220, 40, 40), "title": (220, 40, 40),
     "text": (40, 110, 215), "list_item": (40, 160, 60),
@@ -167,16 +175,21 @@ def _annotate(img: Image.Image, doctags: str) -> Image.Image:
 def playground(img, max_tokens, show_boxes):
     if img is None:
         return None, "Hãy upload ảnh.", "", ""
+    W_orig, H_orig = img.size
+    img_norm = _normalize(img)          # resize to training DPI before inference
     try:
-        doctags, dt, toks = _infer(img, ADAPTER, max_tokens)
+        doctags, dt, toks = _infer(img_norm, ADAPTER, max_tokens)
     except Exception as exc:  # noqa: BLE001
         return None, f"Lỗi gọi serving: {exc}", "", ""
     tps = toks / dt if dt else 0
-    W, H = img.size
-    gx, gy = _GRID_K / W, _GRID_K / H
+    W_n, H_n = img_norm.size
     meta = (f"⏱️ {dt:.1f}s · {toks} tokens · {tps:.1f} tok/s · model={ADAPTER} · "
-            f"ảnh {W}×{H}px · grid {gx:.1f}/{gy:.1f}")
-    left = _annotate(img, doctags) if show_boxes else img
+            f"ảnh gốc {W_orig}×{H_orig}px")
+    if show_boxes:
+        annotated = _annotate(img_norm, doctags)                    # draw on 1240px image
+        left = annotated.resize((W_orig, H_orig), Image.LANCZOS)    # scale back to original
+    else:
+        left = img
     return left, meta, doctags, _render(doctags, img)
 
 
