@@ -138,7 +138,7 @@ class PoolInstance(BaseModel):
     tunnel_url: str | None = None
     adapter: str | None = None     # which adapter version this instance serves
     ready: bool = False
-    age_s: int = 0
+    uptime_s: int = 0              # seconds since the instance was launched
 
 
 class DeployStatusResponse(BaseModel):

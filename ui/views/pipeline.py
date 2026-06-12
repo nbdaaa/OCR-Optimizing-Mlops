@@ -284,7 +284,7 @@ elif section == _SERVE:
                 [{"name": i["name"],
                   "ready": "✅" if i.get("ready") else "⏳",
                   "adapter": i.get("adapter") or "—",
-                  "age (s)": i.get("age_s"),
+                  "uptime (s)": i.get("uptime_s"),
                   "tunnel": i.get("tunnel_url") or "—"}
                  for i in instances],
                 use_container_width=True, hide_index=True,

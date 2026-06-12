@@ -153,7 +153,7 @@ def _write_status(instances: list[Instance], status: str) -> None:
     st["lb_url"] = os.environ.get("PUBLIC_LB_URL", "")
     st["instances"] = [
         {"name": i.name, "tunnel_url": i.tunnel_url, "adapter": i.adapter,
-         "ready": bool(i.tunnel_url), "age_s": int(time.time() - i.started_at)}
+         "ready": bool(i.tunnel_url), "uptime_s": int(time.time() - i.started_at)}
         for i in instances
     ]
     st["updated_at"] = int(time.time())
