@@ -1,8 +1,8 @@
 import pytest
 
 from src.training.collator import (
+    _markup_keep_from_offsets,
     apply_label_mask,
-    build_keep_token_ids,
     find_boundary_idx,
 )
 
@@ -119,60 +119,32 @@ class TestApplyLabelMask:
         assert any(l != IGNORE_INDEX for l in labels)
 
 
-class TestBboxMaskMode:
-    """keep_only_ids → only loc/structure tokens contribute (text content masked)."""
+class TestMarkupKeepFromOffsets:
+    """Span-based bbox keep: True for tokens inside <...> markup, False for content.
+    granite-docling splits <loc_173> into < / loc / _ / 173 / > — all must be kept."""
 
-    def test_only_kept_ids_contribute(self):
-        # assistant = [tag(900), loc(910), text(200), text(201), loc(911)]
-        seq, attn, boundary_end = make_sequence(
-            user_tokens=[10, 20],
-            assistant_tokens=[900, 910, 200, 201, 911],
-        )
-        keep = {900, 910, 911}  # tag + loc tokens; 200/201 are text
-        labels = apply_label_mask(
-            seq, attn, boundary_end_idx=boundary_end,
-            image_token_id=IMAGE_TOKEN_ID, keep_only_ids=keep,
-        )
-        a = labels[boundary_end:]
-        assert a == [900, 910, IGNORE_INDEX, IGNORE_INDEX, 911]
+    def test_keeps_markup_masks_content(self):
+        text = "<text><loc_5>hi</text>"
+        # <text>=(0,6)  <loc_5>=(6,13)  hi=(13,15)  </text>=(15,22)
+        offsets = [(0, 6), (6, 13), (13, 15), (15, 22)]
+        assert _markup_keep_from_offsets(text, offsets) == [True, True, False, True]
 
-    def test_text_only_assistant_fully_masked(self):
-        seq, attn, boundary_end = make_sequence(
-            user_tokens=[10],
-            assistant_tokens=[200, 201, 202],  # no kept ids
-        )
-        labels = apply_label_mask(
-            seq, attn, boundary_end_idx=boundary_end,
-            image_token_id=IMAGE_TOKEN_ID, keep_only_ids={900, 910},
-        )
-        assert all(l == IGNORE_INDEX for l in labels)
+    def test_loc_coordinate_pieces_kept(self):
+        text = "<loc_173>x"
+        # < loc _ 173 >  then content 'x'
+        offsets = [(0, 1), (1, 4), (4, 5), (5, 8), (8, 9), (9, 10)]
+        keep = _markup_keep_from_offsets(text, offsets)
+        assert keep[3] is True    # the '173' coordinate token is inside markup
+        assert keep[-1] is False  # 'x' content masked
 
-    def test_none_keep_ids_is_backward_compatible(self):
-        seq, attn, boundary_end = make_sequence(
-            user_tokens=[10], assistant_tokens=[DOCTAG_TOKEN_ID, 50, 60],
-        )
-        labels = apply_label_mask(seq, attn, boundary_end_idx=boundary_end,
-                                  image_token_id=IMAGE_TOKEN_ID, keep_only_ids=None)
-        assert labels[boundary_end:] == [DOCTAG_TOKEN_ID, 50, 60]
+    def test_empty_span_token_masked(self):
+        # image/pad tokens often map to (0,0) → no overlap → masked
+        assert _markup_keep_from_offsets("<a>", [(0, 0)]) == [False]
 
-
-class TestBuildKeepTokenIds:
-    class _FakeTok:
-        def __init__(self, vocab):
-            self._v = vocab
-        def get_vocab(self):
-            return self._v
-
-    def test_picks_loc_and_element_tags_only(self):
-        vocab = {
-            "<loc_0>": 1, "<loc_173>": 2, "<loc_500>": 3,
-            "<text>": 4, "</text>": 5, "<section_header_level_1>": 6,
-            "<doctag>": 7, "</otsl>": 8,
-            "<|start_of_role|>": 9,    # chat role → excluded (has '|')
-            "hello": 10, "Ố": 11, " the": 12,   # normal text → excluded
-        }
-        keep = build_keep_token_ids(self._FakeTok(vocab))
-        assert keep == {1, 2, 3, 4, 5, 6, 7, 8}
+    def test_content_between_two_tags(self):
+        text = "<a>foo</a>"
+        offsets = [(0, 3), (3, 6), (6, 10)]   # <a>  foo  </a>
+        assert _markup_keep_from_offsets(text, offsets) == [True, False, True]
 
 
 class TestFindBoundaryIdx:

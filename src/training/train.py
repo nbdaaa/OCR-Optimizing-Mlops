@@ -159,20 +159,43 @@ class DataCollatorForOCR:
     def __init__(
         self, processor, config: TrainConfig | None = None, mask_mode: str = "all"
     ) -> None:
-        from src.training.collator import build_keep_token_ids
-
         self.processor = processor
+        self.tokenizer = processor.tokenizer
         self.max_length = (config or TrainConfig()).max_length
         self.mask_mode = mask_mode
         boundary_text = "<|start_of_role|>assistant<|end_of_role|>"
         self._boundary_tokens: list[int] = processor.tokenizer(
             boundary_text, add_special_tokens=False
         ).input_ids
-        self._keep_ids = None
+        self._bbox_warned = False
         if mask_mode == "bbox":
-            self._keep_ids = build_keep_token_ids(processor.tokenizer)
-            print(f"[collator] mask_mode=bbox → loss on {len(self._keep_ids)} "
-                  f"loc/structure tokens only", flush=True)
+            print("[collator] mask_mode=bbox → loss on DocTags markup spans "
+                  "(element tags + <loc_> coords), text content masked", flush=True)
+
+    def _apply_bbox_mask(self, output_text, ids, boundary_end, labels):
+        """Mask natural-language content in the assistant region, keeping loss on
+        markup (element tags + loc coordinate spans). No-op fallback on any
+        mismatch so a bad alignment never corrupts labels."""
+        from src.training.collator import IGNORE_INDEX, build_bbox_label_keep
+
+        try:
+            enc_ids, keep = build_bbox_label_keep(self.tokenizer, output_text)
+        except Exception:  # noqa: BLE001 — non-fast tokenizer → keep all-mode
+            return labels
+        n = len(enc_ids)
+        # Assistant content begins right after the boundary and must equal a
+        # fresh tokenization of output_text (the special-token boundary blocks
+        # BPE merges across it). If not, skip masking this sample.
+        if ids[boundary_end:boundary_end + n] != enc_ids:
+            if not self._bbox_warned:
+                print("[collator] bbox align mismatch → all-token loss for "
+                      "affected samples", flush=True)
+                self._bbox_warned = True
+            return labels
+        for j, k in enumerate(keep):
+            if not k:
+                labels[boundary_end + j] = IGNORE_INDEX
+        return labels
 
     def __call__(self, samples: list[dict]) -> dict:
         import torch
@@ -207,13 +230,14 @@ class DataCollatorForOCR:
         )
 
         labels = []
-        for ids, mask in zip(
-            batch["input_ids"].tolist(), batch["attention_mask"].tolist()
+        for sample, ids, mask in zip(
+            samples, batch["input_ids"].tolist(), batch["attention_mask"].tolist()
         ):
             boundary_end = find_boundary_idx(ids, self._boundary_tokens)
-            labels.append(
-                apply_label_mask(ids, mask, boundary_end, keep_only_ids=self._keep_ids)
-            )
+            lab = apply_label_mask(ids, mask, boundary_end)
+            if self.mask_mode == "bbox" and boundary_end >= 0:
+                lab = self._apply_bbox_mask(sample["output_text"], ids, boundary_end, lab)
+            labels.append(lab)
 
         batch["labels"] = torch.tensor(labels, dtype=torch.long)
         return batch

@@ -21,24 +21,37 @@ IGNORE_INDEX = -100
 IMAGE_TOKEN_ID = 100270
 DOCTAG_TOKEN_ID = 100327
 
-# Matches docling structural tokens that are single special tokens in the
-# granite-docling vocab: <loc_173>, <text>, </text>, <section_header_level_1>,
-# <doctag>, </otsl>, <caption>, <list_item>, ... — but NOT chat-role tokens
-# like <|start_of_role|> (the '|' fails the class) nor plain text.
-_KEEP_TOKEN_RE = re.compile(r"^</?[a-z][a-z0-9_]*>$")
+# granite-docling tokenizes loc coords as MULTIPLE pieces ("<loc_173>" → "<",
+# "loc", "_", "173", ">") — there are NO single <loc_N> vocab tokens. So bbox
+# masking can't use a token-id allow-list; it must keep loss on the token SPANS
+# that fall inside DocTags markup ("<...>") and mask the natural-language content
+# between tags. _MARKUP_RE matches every markup span (element tags + loc tags +
+# literal table HTML); chars outside any span are content → masked.
+_MARKUP_RE = re.compile(r"<[^>]*>")
 
 
-def build_keep_token_ids(tokenizer) -> set[int]:
+def _markup_keep_from_offsets(text: str, offsets) -> list[bool]:
+    """Per-token keep flags: True if the token's char span overlaps any <...>
+    markup span in `text`, else False (natural-language content). Tokens with an
+    empty span (e.g. (0,0) for image/pad) are False."""
+    is_markup = bytearray(len(text))
+    for m in _MARKUP_RE.finditer(text):
+        for i in range(m.start(), m.end()):
+            is_markup[i] = 1
+    return [bool(e > s and any(is_markup[s:e])) for s, e in offsets]
+
+
+def build_bbox_label_keep(tokenizer, text: str):
     """
-    Return the set of vocab IDs for loc + element/structure tags (the tokens
-    kept in "bbox" mask mode). Scans the full vocab so it adapts to whatever
-    loc range / element tags the tokenizer actually defines.
+    Tokenize `text` (assistant DocTags, no special tokens) and return
+    (input_ids, keep_flags): keep_flags[i] True for markup tokens (element /
+    structure tags + loc coordinate spans), False for text content.
+
+    Requires a fast tokenizer (return_offsets_mapping); raises otherwise — the
+    caller then falls back to normal all-token masking for that sample.
     """
-    keep: set[int] = set()
-    for tok, tid in tokenizer.get_vocab().items():
-        if _KEEP_TOKEN_RE.match(tok):
-            keep.add(tid)
-    return keep
+    enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    return enc["input_ids"], _markup_keep_from_offsets(text, enc["offset_mapping"])
 
 
 def find_boundary_idx(input_ids: list[int], boundary_tokens: list[int]) -> int:
@@ -67,7 +80,6 @@ def apply_label_mask(
     attention_mask: list[int],
     boundary_end_idx: int,
     image_token_id: int = IMAGE_TOKEN_ID,
-    keep_only_ids: set[int] | None = None,
 ) -> list[int]:
     """
     Build labels from input_ids by masking everything that should not
@@ -77,15 +89,15 @@ def apply_label_mask(
       - All tokens before boundary_end_idx  (user turn + boundary tokens)
       - Any image token (image_token_id) regardless of position
       - Padding tokens  (attention_mask == 0)
-      - If keep_only_ids is given: any assistant token whose ID is NOT in the
-        set (i.e. "bbox" mode keeps only loc + structure tags, masks text).
+
+    bbox-mode (mask text content, keep markup) is applied ON TOP of this by the
+    collator using build_bbox_label_keep, not here.
 
     Args:
         input_ids:        Token IDs for a single sequence.
         attention_mask:   1 for real tokens, 0 for padding.
         boundary_end_idx: Index where assistant content starts.
         image_token_id:   Token ID to always mask (default 100270).
-        keep_only_ids:    If set, assistant tokens not in it are masked.
 
     Returns:
         List of int labels, same length as input_ids.
@@ -93,8 +105,6 @@ def apply_label_mask(
     labels = []
     for i, (token_id, mask) in enumerate(zip(input_ids, attention_mask)):
         if mask == 0 or token_id == image_token_id or i < boundary_end_idx:
-            labels.append(IGNORE_INDEX)
-        elif keep_only_ids is not None and token_id not in keep_only_ids:
             labels.append(IGNORE_INDEX)
         else:
             labels.append(token_id)
