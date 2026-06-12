@@ -183,6 +183,7 @@ def _write_nginx(ready_urls: list[str]) -> None:
             f'split_clients "$remote_addr$request_id" $ocr_backend {{\n{split}}}\n'
             'server {\n'
             '  listen 80;\n'
+            '  client_max_body_size 50m;\n'   # base64 document images exceed nginx default 1m
             '  resolver 1.1.1.1 ipv6=off valid=30s;\n'
             '  location = /lb-health { return 200 "ok\\n"; }\n'
             '  location / {\n'
