@@ -20,6 +20,7 @@ import io
 import os
 import re
 import time
+import unicodedata
 
 import gradio as gr
 import pandas as pd
@@ -56,6 +57,9 @@ def _infer(img: Image.Image, model: str, max_tokens: int):
     r.raise_for_status()
     j = r.json()
     text = j["choices"][0]["message"]["content"]
+    # Vietnamese diacritics often come back decomposed (NFD: â + ◌́) → compose to
+    # NFC so "suâ´t" renders as "suất".
+    text = unicodedata.normalize("NFC", text)
     toks = (j.get("usage") or {}).get("completion_tokens", 0)
     return text, dt, toks
 
