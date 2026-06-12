@@ -122,6 +122,11 @@ services:
       TRAIN_DOCKER_IMAGE: ${TRAIN_DOCKER_IMAGE}
       GIT_REPO_URL: ${GIT_REPO_URL}
       REMOTE_WORK_DIR: ${REMOTE_WORK_DIR}
+      # Fast post-train CER+loc eval: HF dataset repo holding vllm-venv.tar.zst
+      # (same cache the Colab pool uses). Empty → train.py prints the manual
+      # `--recover` hint instead of running the vLLM eval phase.
+      VLLM_VENV_REPO: ${VLLM_VENV_REPO:-}
+      VLLM_VENV_PYTHON: ${VLLM_VENV_PYTHON:-/content/vllm-venv/bin/python}
     volumes:
       # Mount source so code changes apply on `up -d` (recreate) without rebuild
       - ../src:/app/src:ro
