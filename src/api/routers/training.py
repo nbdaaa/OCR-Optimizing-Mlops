@@ -84,6 +84,27 @@ def _build_onstart(
     for flag, val in hyperparams.items():
         if val is not None:
             args += f" {flag} {val}"
+
+    # Phase-2 vLLM CER eval: restore the cached vLLM venv (built once for the
+    # train image, stored on HF) and run eval_cer_vllm.py with that venv's python.
+    # VLLM_VENV_REPO is the HF dataset repo holding vllm-venv.tar.zst.
+    # VLLM_VENV_REPO: HF dataset repo holding vllm-venv.tar.zst (built on the SAME
+    # GPU/CUDA as the train image so vllm._C imports). VLLM_VENV_PYTHON: venv python
+    # path inside the tarball (default matches build_vllm_cache.py packing).
+    venv_repo = os.environ.get("VLLM_VENV_REPO", "")
+    venv_py = os.environ.get("VLLM_VENV_PYTHON", "/content/vllm-venv/bin/python")
+    if venv_repo:
+        vllm_eval_block = f"""export HF_XET_HIGH_PERFORMANCE=1
+apt-get install -y zstd >/dev/null 2>&1 || true
+pip install -q huggingface_hub hf_xet
+TARB=$(python -c "from huggingface_hub import hf_hub_download; print(hf_hub_download('{venv_repo}','vllm-venv.tar.zst',repo_type='dataset'))")
+tar -C / -I zstd -xf "$TARB"
+{venv_py} {work_dir}/src/training/eval_cer_vllm.py --run-id {run_id}"""
+    else:
+        vllm_eval_block = (
+            'echo "VLLM_VENV_REPO not set -> skipping vLLM CER eval. '
+            f'Run: python -m src.training.train --recover --run-id {run_id} to finalize CER."'
+        )
     return f"""#!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -95,7 +116,13 @@ pip install -q -r requirements-train.txt
 cat > .env <<'ENVEOF'
 {env_block}
 ENVEOF
-python -m src.training.train {args}
+set -a; . ./.env; set +a
+# Phase 1: train → save adapter → benchmark_loss → register Staging → EXIT
+# (--defer-eval skips the slow transformers CER + skips self-destruct so the
+#  GPU is freed for the fast vLLM eval phase below).
+python -m src.training.train {args} --defer-eval
+# Phase 2: fast CER via vLLM offline, using the cached vLLM venv (no rebuild).
+{vllm_eval_block}
 """
 
 

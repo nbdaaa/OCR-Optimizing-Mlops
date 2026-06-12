@@ -391,7 +391,11 @@ def train(
     run_id: str | None = None,
     resume_from_checkpoint: bool = False,
     init_adapter_version: str | None = None,
+    defer_eval: bool = False,
 ) -> str:
+    # defer_eval=True: skip the slow in-process CER generate AND skip self-destruct
+    # — a separate vLLM eval phase (eval_cer_vllm.py) computes CER on this same
+    # instance after the training process exits (freeing the GPU), then destroys it.
     """
     Full LoRA fine-tune pipeline (continual):
       1. Pull dataset.parquet from MinIO
@@ -550,21 +554,29 @@ def train(
         except Exception as exc:  # noqa: BLE001
             print(f"[train] benchmark loss failed: {exc}", flush=True)
 
-        print(f"[train] computing CER ...", flush=True)
-        try:
-            cer = evaluate_cer(
-                model, processor, bench_df, cfg,
-                n_samples=1 if smoke_test else None,   # None → full benchmark
-                max_new_tokens=64 if smoke_test else None,
-            )
-            mlflow.log_metric("cer", cer)
-            print(f"[train] CER = {cer:.4f}", flush=True)
-        except Exception as exc:  # noqa: BLE001 — don't lose the run if CER fails
-            print(f"[train] CER eval failed (still registering): {exc}", flush=True)
+        if defer_eval:
+            # CER computed later by the vLLM eval phase (much faster than the
+            # transformers generate loop). benchmark_loss already logged above.
+            print("[train] defer_eval=True → skipping in-process CER "
+                  "(vLLM eval phase will compute it)", flush=True)
+        else:
+            print(f"[train] computing CER ...", flush=True)
+            try:
+                cer = evaluate_cer(
+                    model, processor, bench_df, cfg,
+                    n_samples=1 if smoke_test else None,   # None → full benchmark
+                    max_new_tokens=64 if smoke_test else None,
+                )
+                mlflow.log_metric("cer", cer)
+                print(f"[train] CER = {cer:.4f}", flush=True)
+            except Exception as exc:  # noqa: BLE001 — don't lose the run if CER fails
+                print(f"[train] CER eval failed (still registering): {exc}", flush=True)
 
     wandb.finish()
     register_adapter(run_id, config=cfg)
-    if not smoke_test:
+    # When deferring, leave the instance alive — the vLLM eval phase self-destructs
+    # after logging CER. Otherwise tear down now.
+    if not smoke_test and not defer_eval:
         _self_destruct(run_id)
     return run_id
 
@@ -703,6 +715,11 @@ if __name__ == "__main__":
         "--init-adapter-version", default=None,
         help="Continual: warm-start from this model version (default: latest)",
     )
+    parser.add_argument(
+        "--defer-eval", action="store_true",
+        help="Skip in-process CER + self-destruct; a separate vLLM eval phase "
+             "computes CER on the same instance after this process exits.",
+    )
     # Optional hyperparameter overrides (default → TrainConfig values)
     parser.add_argument("--num-epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -735,4 +752,5 @@ if __name__ == "__main__":
             run_id=args.run_id,
             resume_from_checkpoint=args.resume,
             init_adapter_version=args.init_adapter_version,
+            defer_eval=args.defer_eval,
         ))
