@@ -93,17 +93,31 @@ def _build_onstart(
     venv_repo = os.environ.get("VLLM_VENV_REPO", "")
     venv_py = os.environ.get("VLLM_VENV_PYTHON", "/content/vllm-venv/bin/python")
     if venv_repo:
+        # Restore the Colab vLLM venv. Its bin/python* symlinks point at a Python
+        # 3.12 that doesn't exist on the train box (conda 3.11 / system 3.10), so
+        # recreate a REAL 3.12 in an isolated conda env (no conflict with the train
+        # deps) and re-point the venv at it + ensurepip, mirroring the manual fix.
+        # All best-effort: if any step fails, the `import vllm` guard skips eval and
+        # the onstart's --recover fallback finalizes via transformers instead.
         vllm_eval_block = f"""export HF_XET_HIGH_PERFORMANCE=1
 apt-get install -y zstd >/dev/null 2>&1 || true
 pip install -q huggingface_hub hf_xet
 TARB=$(python -c "from huggingface_hub import hf_hub_download; print(hf_hub_download('{venv_repo}','vllm-venv.tar.zst',repo_type='dataset'))")
 tar -C / -I zstd -xf "$TARB"
-{venv_py} {work_dir}/src/training/eval_cer_vllm.py --run-id {run_id}"""
+VENV_DIR=$(dirname $(dirname {venv_py}))
+CONDA=$(command -v conda || echo /opt/conda/bin/conda)
+"$CONDA" create -y -n vllmeval python=3.12 >/dev/null 2>&1
+PY312=/opt/conda/envs/vllmeval/bin/python3.12
+ln -sf "$PY312" "$VENV_DIR/bin/python"
+ln -sf "$PY312" "$VENV_DIR/bin/python3"
+ln -sf "$PY312" "$VENV_DIR/bin/python3.12"
+sed -i "s#^home = .*#home = /opt/conda/envs/vllmeval/bin#" "$VENV_DIR/pyvenv.cfg"
+{venv_py} -m ensurepip --upgrade >/dev/null 2>&1
+if {venv_py} -c "import vllm" 2>/dev/null; then
+  {venv_py} {work_dir}/src/training/eval_cer_vllm.py --run-id {run_id}
+fi"""
     else:
-        vllm_eval_block = (
-            'echo "VLLM_VENV_REPO not set -> skipping vLLM CER eval. '
-            f'Run: python -m src.training.train --recover --run-id {run_id} to finalize CER."'
-        )
+        vllm_eval_block = 'echo "VLLM_VENV_REPO not set -> using transformers recover for CER."'
     return f"""#!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -120,8 +134,15 @@ set -a; . ./.env; set +a
 # (--defer-eval skips the slow transformers CER + skips self-destruct so the
 #  GPU is freed for the fast vLLM eval phase below).
 python -m src.training.train {args} --defer-eval
-# Phase 2: fast CER via vLLM offline, using the cached vLLM venv (no rebuild).
+# Phase 2: fast CER+loc eval via the cached vLLM venv. Best-effort — `set +e` so a
+# broken venv can't abort before cleanup. If vLLM succeeds, eval_cer_vllm.py
+# self-destructs the instance here and the recover line below never runs. If vLLM
+# is skipped/fails, we're still alive → `--recover` is stage-aware: it finalizes
+# CER+loc_mae via transformers (slow but always works on the train env), registers,
+# and self-destructs. Either way metrics get logged and no idle GPU is left behind.
+set +e
 {vllm_eval_block}
+python -m src.training.train --recover --run-id {run_id}
 """
 
 
