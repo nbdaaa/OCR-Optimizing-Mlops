@@ -56,12 +56,24 @@ def _infer(img: Image.Image, model: str, max_tokens: int):
     dt = time.time() - t0
     r.raise_for_status()
     j = r.json()
-    text = j["choices"][0]["message"]["content"]
-    # Vietnamese diacritics often come back decomposed (NFD: â + ◌́) → compose to
-    # NFC so "suâ´t" renders as "suất".
-    text = unicodedata.normalize("NFC", text)
+    text = _fix_vn(j["choices"][0]["message"]["content"])
     toks = (j.get("usage") or {}).get("completion_tokens", 0)
     return text, dt, toks
+
+
+# This model emits Vietnamese tone marks as SPACING characters (´ U+00B4, ` U+0060,
+# …) instead of combining marks, so plain NFC can't compose them ("PHỐ´", "vê`").
+# Map the spacing marks → their combining equivalents, then NFC composes them
+# ("Ô"+◌́ → "Ố", "ê"+◌̀ → "ề").
+_SPACING_TONE = str.maketrans({
+    "´": "́", "ˊ": "́",   # acute  (sắc)
+    "`": "̀", "ˋ": "̀",   # grave  (huyền)
+    "˜": "̃",                        # tilde  (ngã)
+    "ˇ": "̉",                        # hook above (hỏi) — best-effort
+})
+
+def _fix_vn(text: str) -> str:
+    return unicodedata.normalize("NFC", text.translate(_SPACING_TONE))
 
 
 _RENDER_CSS = """
@@ -132,14 +144,13 @@ def _annotate(img: Image.Image, doctags: str) -> Image.Image:
     im = img.convert("RGB").copy()
     d = ImageDraw.Draw(im)
     W, H = im.size
-    # granite-docling normalizes coords to a 0-500 grid on the LONGEST side
-    # (aspect preserved) → map back with max(W,H), same factor on both axes.
-    side = max(W, H)
+    # DocTags loc is a 0-500 grid normalized PER-AXIS (docling-core's mapping):
+    # x_px = lx/500*W, y_px = ly/500*H.
     for m in _BOX_RE.finditer(doctags):
         tag = m.group(1)
         x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
-        box = [x1 / _LOC_SCALE * side, y1 / _LOC_SCALE * side,
-               x2 / _LOC_SCALE * side, y2 / _LOC_SCALE * side]
+        box = [x1 / _LOC_SCALE * W, y1 / _LOC_SCALE * H,
+               x2 / _LOC_SCALE * W, y2 / _LOC_SCALE * H]
         d.rectangle(box, outline=_color(tag), width=2)
     return im
 
