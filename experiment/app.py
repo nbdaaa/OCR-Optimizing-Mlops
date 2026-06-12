@@ -77,16 +77,35 @@ _RENDER_CSS = """
 </style>
 """
 
-def _render(doctags: str, img: Image.Image) -> str:
-    """DocTags → styled HTML via docling-core; fall back to a <pre> dump."""
-    try:
-        from docling_core.types.doc import DoclingDocument
-        from docling_core.types.doc.document import DocTagsDocument
-        dt = DocTagsDocument.from_doctags_and_image_pairs([doctags], [img.convert("RGB")])
-        doc = DoclingDocument.load_from_doctags(dt, document_name="page")
-        return _RENDER_CSS + f'<div class="doc-render">{doc.export_to_html()}</div>'
-    except Exception as exc:  # noqa: BLE001
-        return f"<p style='color:#b00'>render lỗi ({exc}); raw:</p><pre>{doctags}</pre>"
+def _render(doctags: str, img: Image.Image | None = None) -> str:
+    """
+    Render DocTags → styled HTML with a custom converter.
+
+    This model emits element tags (text/section_header/list_item/caption/...) with
+    <loc> coords, and TABLES as literal HTML (<table border="1">...), NOT OTSL — so
+    docling-core can't parse them. We convert element tags to HTML and keep table
+    HTML as-is (browsers render it natively).
+    """
+    s = doctags
+    s = re.sub(r"</?doctag>", "", s)
+    s = re.sub(r"<loc_\d+>", "", s)                      # drop coordinate tokens
+    # collapse the <table> doctag wrapper around the inner HTML table
+    s = re.sub(r"<table>\s*(<table)", r"\1", s)
+    s = re.sub(r"(</table>)\s*</table>", r"\1", s)
+    # element tags → HTML
+    s = re.sub(r"<section_header_level_\d+>(.*?)</section_header_level_\d+>",
+               r"<h3>\1</h3>", s, flags=re.S)
+    s = re.sub(r"<title>(.*?)</title>", r"<h1>\1</h1>", s, flags=re.S)
+    s = re.sub(r"<caption>(.*?)</caption>", r'<p class="cap"><b>\1</b></p>', s, flags=re.S)
+    s = re.sub(r"<text>(.*?)</text>", r"<p>\1</p>", s, flags=re.S)
+    s = re.sub(r"<(page_header|page_footer)>(.*?)</\1>",
+               r'<div class="meta">\2</div>', s, flags=re.S)
+    s = re.sub(r"<unordered_list>(.*?)</unordered_list>", r"<ul>\1</ul>", s, flags=re.S)
+    s = re.sub(r"<ordered_list>(.*?)</ordered_list>", r"<ol>\1</ol>", s, flags=re.S)
+    s = re.sub(r"<list_item>(.*?)</list_item>", r"<li>\1</li>", s, flags=re.S)
+    s = re.sub(r"<picture>(.*?)</picture>", r'<div class="fig">🖼 \1</div>', s, flags=re.S)
+    s = re.sub(r"</?formula>", "", s)
+    return _RENDER_CSS + f'<div class="doc-render">{s}</div>'
 
 
 # DocTags loc tokens are on a 0-500 normalized grid. Draw a box per element,
@@ -97,8 +116,9 @@ _TYPE_COLORS = {
     "section_header": (220, 40, 40), "title": (220, 40, 40),
     "text": (40, 110, 215), "list_item": (40, 160, 60),
     "caption": (210, 130, 20), "picture": (160, 40, 200),
-    "otsl": (20, 170, 170), "page_footer": (130, 130, 130),
-    "page_header": (130, 130, 130), "formula": (170, 90, 30),
+    "table": (20, 170, 170), "otsl": (20, 170, 170),
+    "page_footer": (130, 130, 130), "page_header": (130, 130, 130),
+    "formula": (170, 90, 30),
 }
 
 def _color(tag: str):
@@ -112,11 +132,14 @@ def _annotate(img: Image.Image, doctags: str) -> Image.Image:
     im = img.convert("RGB").copy()
     d = ImageDraw.Draw(im)
     W, H = im.size
+    # granite-docling normalizes coords to a 0-500 grid on the LONGEST side
+    # (aspect preserved) → map back with max(W,H), same factor on both axes.
+    side = max(W, H)
     for m in _BOX_RE.finditer(doctags):
         tag = m.group(1)
         x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
-        box = [x1 / _LOC_SCALE * W, y1 / _LOC_SCALE * H,
-               x2 / _LOC_SCALE * W, y2 / _LOC_SCALE * H]
+        box = [x1 / _LOC_SCALE * side, y1 / _LOC_SCALE * side,
+               x2 / _LOC_SCALE * side, y2 / _LOC_SCALE * side]
         d.rectangle(box, outline=_color(tag), width=2)
     return im
 

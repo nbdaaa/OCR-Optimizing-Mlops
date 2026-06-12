@@ -3,4 +3,5 @@ gradio>=4.0.0
 requests>=2.31.0
 pandas>=2.0.0
 pillow>=10.0.0
-docling-core>=2.0.0     # render DocTags → HTML/Markdown
+# DocTags rendered by a small custom converter (this model emits HTML tables,
+# not OTSL) — no docling-core needed.
