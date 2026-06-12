@@ -126,7 +126,7 @@ def _render(doctags: str, img: Image.Image | None = None) -> str:
 # DocTags loc tokens are on a 0-500 normalized grid. Draw a box per element,
 # coloured by type, to mirror docling's layout visualisation (left panel).
 _BOX_RE = re.compile(r"<([a-z_0-9]+)><loc_(\d+)><loc_(\d+)><loc_(\d+)><loc_(\d+)>")
-_LOC_SCALE = 500.0
+_GRID_K = 500_000   # empirical: grid_x * W ≈ grid_y * H ≈ 500_000 across all formats/DPIs
 _TYPE_COLORS = {
     "section_header": (220, 40, 40), "title": (220, 40, 40),
     "text": (40, 110, 215), "list_item": (40, 160, 60),
@@ -142,19 +142,14 @@ def _color(tag: str):
             return col
     return (90, 90, 90)
 
-# loc → pixel mapping uses per-axis grids (NOT 500). Calibrated on ground-truth
-# training samples: this dataset's loc are normalized with different effective
-# grids per axis. Tunable live in the UI.
-GRID_X_DEFAULT = 345.0
-GRID_Y_DEFAULT = 293.0
-
-def _annotate(img: Image.Image, doctags: str,
-              grid_x: float = GRID_X_DEFAULT, grid_y: float = GRID_Y_DEFAULT) -> Image.Image:
-    """Overlay element bounding boxes (coloured by type). x_px=loc_x/grid_x*W."""
+def _annotate(img: Image.Image, doctags: str) -> Image.Image:
+    """Overlay element bounding boxes. Grid auto-derived: grid_x=500k/W, grid_y=500k/H."""
     im = img.convert("RGB").copy()
     d = ImageDraw.Draw(im)
     W, H = im.size
-    seen = set()
+    grid_x = _GRID_K / W
+    grid_y = _GRID_K / H
+    seen: set = set()
     for m in _BOX_RE.finditer(doctags):
         tag = m.group(1)
         x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
@@ -169,7 +164,7 @@ def _annotate(img: Image.Image, doctags: str,
 
 # ── Tab 1: Playground ─────────────────────────────────────────────────────────
 
-def playground(img, max_tokens, show_boxes, grid_x, grid_y):
+def playground(img, max_tokens, show_boxes):
     if img is None:
         return None, "Hãy upload ảnh.", "", ""
     try:
@@ -178,9 +173,10 @@ def playground(img, max_tokens, show_boxes, grid_x, grid_y):
         return None, f"Lỗi gọi serving: {exc}", "", ""
     tps = toks / dt if dt else 0
     W, H = img.size
+    gx, gy = _GRID_K / W, _GRID_K / H
     meta = (f"⏱️ {dt:.1f}s · {toks} tokens · {tps:.1f} tok/s · model={ADAPTER} · "
-            f"ảnh {W}×{H}px · grid {grid_x:g}/{grid_y:g}")
-    left = _annotate(img, doctags, grid_x, grid_y) if show_boxes else img
+            f"ảnh {W}×{H}px · grid {gx:.1f}/{gy:.1f}")
+    left = _annotate(img, doctags) if show_boxes else img
     return left, meta, doctags, _render(doctags, img)
 
 
@@ -229,10 +225,7 @@ with gr.Blocks(title="OCR Experiment") as demo:
         with gr.Row():
             pg_img = gr.Image(type="pil", label="Ảnh tài liệu", height=300)
             pg_tok = gr.Slider(256, 4096, value=2048, step=128, label="max_tokens")
-        with gr.Row():
-            pg_box = gr.Checkbox(value=True, label="Hiện bounding box")
-            pg_gx = gr.Number(value=GRID_X_DEFAULT, label="grid_x (giảm → box rộng hơn)")
-            pg_gy = gr.Number(value=GRID_Y_DEFAULT, label="grid_y (giảm → box cao hơn)")
+        pg_box = gr.Checkbox(value=True, label="Hiện bounding box (grid tự động theo kích thước ảnh)")
         pg_btn = gr.Button("Convert → DocTags", variant="primary")
         pg_meta = gr.Markdown()
         with gr.Row():
@@ -244,7 +237,7 @@ with gr.Blocks(title="OCR Experiment") as demo:
                 pg_html = gr.HTML()
         with gr.Accordion("DocTags (raw)", open=False):
             pg_raw = gr.Code(label="raw")
-        pg_btn.click(playground, [pg_img, pg_tok, pg_box, pg_gx, pg_gy],
+        pg_btn.click(playground, [pg_img, pg_tok, pg_box],
                      [pg_boxes, pg_meta, pg_raw, pg_html])
 
     with gr.Tab("Versions"):
