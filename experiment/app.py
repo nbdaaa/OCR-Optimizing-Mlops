@@ -18,12 +18,13 @@ from __future__ import annotations
 import base64
 import io
 import os
+import re
 import time
 
 import gradio as gr
 import pandas as pd
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw
 
 LB_URL   = os.environ.get("LB_URL", "http://34.142.198.19").rstrip("/")
 API_BASE = os.environ.get("API_BASE", "http://34.142.198.19:8000").rstrip("/")
@@ -59,30 +60,75 @@ def _infer(img: Image.Image, model: str, max_tokens: int):
     return text, dt, toks
 
 
+_RENDER_CSS = """
+<style>
+.doc-render{max-width:820px;margin:0 auto;padding:32px 40px;background:#fff;color:#1a1a1a;
+  font-family:Georgia,'Times New Roman',serif;line-height:1.55;box-shadow:0 1px 6px rgba(0,0,0,.15);}
+.doc-render h1{font-size:1.5em;font-weight:700;margin:.2em 0 .6em;}
+.doc-render h2,.doc-render h3{font-weight:700;margin:1em 0 .4em;}
+.doc-render p{margin:.5em 0;text-align:justify;}
+.doc-render ul,.doc-render ol{margin:.5em 0 .5em 1.4em;}
+.doc-render table{border-collapse:collapse;margin:.8em 0;width:100%;}
+.doc-render th,.doc-render td{border:1px solid #bbb;padding:4px 8px;font-size:.9em;}
+</style>
+"""
+
 def _render(doctags: str, img: Image.Image) -> str:
-    """DocTags → HTML via docling-core; fall back to a <pre> dump."""
+    """DocTags → styled HTML via docling-core; fall back to a <pre> dump."""
     try:
         from docling_core.types.doc import DoclingDocument
         from docling_core.types.doc.document import DocTagsDocument
         dt = DocTagsDocument.from_doctags_and_image_pairs([doctags], [img.convert("RGB")])
         doc = DoclingDocument.load_from_doctags(dt, document_name="page")
-        return doc.export_to_html()
+        return _RENDER_CSS + f'<div class="doc-render">{doc.export_to_html()}</div>'
     except Exception as exc:  # noqa: BLE001
-        return f"<p style='color:#b00'>render lỗi ({exc}); hiển thị raw:</p><pre>{doctags}</pre>"
+        return f"<p style='color:#b00'>render lỗi ({exc}); raw:</p><pre>{doctags}</pre>"
+
+
+# DocTags loc tokens are on a 0-500 normalized grid. Draw a box per element,
+# coloured by type, to mirror docling's layout visualisation (left panel).
+_BOX_RE = re.compile(r"<([a-z_0-9]+)><loc_(\d+)><loc_(\d+)><loc_(\d+)><loc_(\d+)>")
+_LOC_SCALE = 500.0
+_TYPE_COLORS = {
+    "section_header": (220, 40, 40), "title": (220, 40, 40),
+    "text": (40, 110, 215), "list_item": (40, 160, 60),
+    "caption": (210, 130, 20), "picture": (160, 40, 200),
+    "otsl": (20, 170, 170), "page_footer": (130, 130, 130),
+    "page_header": (130, 130, 130), "formula": (170, 90, 30),
+}
+
+def _color(tag: str):
+    for key, col in _TYPE_COLORS.items():
+        if tag.startswith(key):
+            return col
+    return (90, 90, 90)
+
+def _annotate(img: Image.Image, doctags: str) -> Image.Image:
+    """Overlay element bounding boxes (coloured by type) on the original image."""
+    im = img.convert("RGB").copy()
+    d = ImageDraw.Draw(im)
+    W, H = im.size
+    for m in _BOX_RE.finditer(doctags):
+        tag = m.group(1)
+        x1, y1, x2, y2 = (int(v) for v in m.groups()[1:])
+        box = [x1 / _LOC_SCALE * W, y1 / _LOC_SCALE * H,
+               x2 / _LOC_SCALE * W, y2 / _LOC_SCALE * H]
+        d.rectangle(box, outline=_color(tag), width=2)
+    return im
 
 
 # ── Tab 1: Playground ─────────────────────────────────────────────────────────
 
 def playground(img, max_tokens):
     if img is None:
-        return "Hãy upload ảnh.", "", ""
+        return None, "Hãy upload ảnh.", "", ""
     try:
         doctags, dt, toks = _infer(img, ADAPTER, max_tokens)
     except Exception as exc:  # noqa: BLE001
-        return f"Lỗi gọi serving: {exc}", "", ""
+        return None, f"Lỗi gọi serving: {exc}", "", ""
     tps = toks / dt if dt else 0
     meta = f"⏱️ {dt:.1f}s · {toks} tokens · {tps:.1f} tok/s · model={ADAPTER}"
-    return meta, doctags, _render(doctags, img)
+    return _annotate(img, doctags), meta, doctags, _render(doctags, img)
 
 
 # ── Tab 2: Versions ───────────────────────────────────────────────────────────
@@ -128,16 +174,21 @@ with gr.Blocks(title="OCR Experiment") as demo:
 
     with gr.Tab("Playground"):
         with gr.Row():
+            pg_img = gr.Image(type="pil", label="Ảnh tài liệu", height=300)
+            pg_tok = gr.Slider(256, 4096, value=2048, step=128, label="max_tokens")
+        pg_btn = gr.Button("Convert → DocTags", variant="primary")
+        pg_meta = gr.Markdown()
+        with gr.Row():
             with gr.Column():
-                pg_img = gr.Image(type="pil", label="Ảnh tài liệu")
-                pg_tok = gr.Slider(256, 4096, value=2048, step=128, label="max_tokens")
-                pg_btn = gr.Button("Convert → DocTags", variant="primary")
+                gr.Markdown("#### Layout (bounding boxes theo loại)")
+                pg_boxes = gr.Image(label="Annotated", height=720)
             with gr.Column():
-                pg_meta = gr.Markdown()
-                pg_html = gr.HTML(label="Rendered")
+                gr.Markdown("#### Rendered")
+                pg_html = gr.HTML()
         with gr.Accordion("DocTags (raw)", open=False):
             pg_raw = gr.Code(label="raw")
-        pg_btn.click(playground, [pg_img, pg_tok], [pg_meta, pg_raw, pg_html])
+        pg_btn.click(playground, [pg_img, pg_tok],
+                     [pg_boxes, pg_meta, pg_raw, pg_html])
 
     with gr.Tab("Versions"):
         v_btn = gr.Button("Tải bảng version + CER", variant="primary")
