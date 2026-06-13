@@ -7,15 +7,79 @@ Uses a segmented_control (not st.tabs) to pick the section so ONLY the selected
 section's code runs. st.tabs renders every tab's code each run, which would make
 the Training auto-stream loop rerun the whole page even while viewing Data/CI-CD.
 """
+import os
 import re
 import subprocess
+import sys
+import tempfile
 import time
+from urllib.parse import urlparse
 
 import streamlit as st
 
 from api import api_get, api_post
 
+# Streamlit puts ui/ on sys.path (for `from api import ...`); add the repo root too
+# so the PDF-ingest path can import the client-side pipeline (src.data.pdf_versioning).
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 _PROG_RE = re.compile(r"\d+%\|")  # tqdm progress-bar marker
+
+
+def _api_host() -> str:
+    return urlparse(st.session_state.get("api_base", "")).hostname or "localhost"
+
+
+def _run_pdf_ingest(version, uploaded, inf_url, n, dpi, exclude_bench) -> None:
+    """Client-side: PDFs → inference server → data version(s). Runs in-process
+    (Streamlit is local), so it needs MinIO/MLflow env + pymupdf installed here."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    host = _api_host()
+    os.environ.setdefault("MINIO_ENDPOINT", f"http://{host}:9000")
+    os.environ.setdefault("MLFLOW_TRACKING_URI", f"http://{host}:5000")
+    missing = [k for k in ("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY") if not os.environ.get(k)]
+    if missing:
+        st.error(f"Thiếu trong .env: {', '.join(missing)} — cần để ghi MinIO.")
+        return
+    try:
+        from src.data.pdf_versioning import create_version_from_pdfs
+    except ImportError as exc:  # noqa: BLE001
+        st.error(f"Thiếu dependency: {exc}. Chạy: `pip install pymupdf`")
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for uf in uploaded:
+            p = os.path.join(tmp, uf.name)
+            with open(p, "wb") as f:
+                f.write(uf.getbuffer())
+            paths.append(p)
+        with st.spinner(f"Đang xử lý {len(paths)} PDF qua {inf_url} … "
+                        f"(tiến trình chi tiết in ở terminal chạy streamlit)"):
+            try:
+                written = create_version_from_pdfs(
+                    version=version, pdf_paths=paths, inference_url=inf_url,
+                    max_samples=n, dpi=dpi,
+                    exclude_versions=None if exclude_bench else [],
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Lỗi ingest: {exc}")
+                return
+
+    if not written:
+        st.warning("Không có sample mới nào được thêm (toàn trùng / benchmark / inference lỗi).")
+        return
+    st.success(f"Đã ghi {len(written)} version.")
+    st.dataframe(
+        [{"version": m["version"], "count": m["count"], "target": m["target_per_version"],
+          "trạng thái": "🟢 COMPLETE" if m["complete"] else "🟡 OPEN",
+          "loại do benchmark": m["filter_stats"].get("rejected_benchmark", 0),
+          "run": m["mlflow_run_id"][:8]} for m in written],
+        hide_index=True, use_container_width=True,
+    )
 
 
 def _clean_log(text: str) -> str:
@@ -61,25 +125,35 @@ section = st.segmented_control(
 
 # ── Data: create a version ────────────────────────────────────────────────────
 if section == _DATA:
-    st.subheader("Create a data version")
+    st.subheader("Tạo data version")
     st.caption("Duyệt các version đã có ở MinIO console (xem trang Links).")
-    with st.form("create_version"):
-        version = st.text_input("Version name", placeholder="v1")
-        max_samples = st.number_input("Max samples (empty = all)", min_value=1, value=None, step=100)
-        submitted = st.form_submit_button("Create")
-    if submitted:
+
+    # Self-labeling từ PDF (chạy client-side trong tiến trình Streamlit).
+    # (Mode "Từ HF Hub" tạm ẩn — endpoint /data/versions/create vẫn còn nếu cần.)
+    st.caption("Client tách PDF → ảnh từng trang → inference server → DocTags → gom đủ N "
+               "thành 1 version. Version chưa đủ N giữ trạng thái OPEN, lần sau upload PDF "
+               "mới (cùng version) sẽ append tiếp; đủ N thì đóng, phần dư tràn sang version "
+               "mới tự đánh số. Trang trùng benchmark bị loại tự động (chống leakage).")
+    with st.form("pdf_version"):
+        c1, c2 = st.columns(2)
+        version = c1.text_input("Version name", placeholder="v20",
+                                help="Truyền lại đúng tên version OPEN để append tiếp.")
+        n = c2.number_input("Sample / version (N)", min_value=1, value=200, step=10)
+        inf_url = st.text_input("Inference server URL", value=f"http://{_api_host()}",
+                                help="LB serving (OpenAI-compatible). Pool phải đang Deploy.")
+        c3, c4 = st.columns(2)
+        dpi = c3.number_input("Render DPI", min_value=72, value=200, step=10)
+        exclude_bench = c4.checkbox("Loại trùng benchmark (chống leakage)", value=True)
+        pdfs = st.file_uploader("PDF tài liệu", type=["pdf"], accept_multiple_files=True)
+        go = st.form_submit_button("🚀 Tạo / append version từ PDF", type="primary")
+
+    if go:
         if not version:
-            st.error("Version name is required.")
+            st.error("Cần nhập version name.")
+        elif not pdfs:
+            st.error("Cần upload ít nhất 1 PDF.")
         else:
-            body = {"version": version}
-            if max_samples is not None:
-                body["max_samples"] = int(max_samples)
-            with st.spinner("Creating version (download → filter → dedup → upload)…"):
-                ok, res = api_post("/data/versions/create", json=body)
-            if ok:
-                st.success(f"Created {res['version']} · run {res['mlflow_run_id'][:8]}")
-            else:
-                st.error(res)
+            _run_pdf_ingest(version, pdfs, inf_url.rstrip("/"), int(n), int(dpi), exclude_bench)
 
 # ── Training: trigger + track + live logs ─────────────────────────────────────
 elif section == _TRAIN:

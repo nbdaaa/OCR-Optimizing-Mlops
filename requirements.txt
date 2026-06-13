@@ -24,3 +24,6 @@ httpx>=0.27.0
 Pillow>=10.0.0
 imagehash>=4.3.1
 numpy>=1.26.0,<2
+
+# ── PDF ingest (self-labeling data versioning via the inference server) ───────
+pymupdf>=1.24.0
