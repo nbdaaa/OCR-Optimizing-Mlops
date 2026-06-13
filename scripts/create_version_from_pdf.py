@@ -38,7 +38,8 @@ from src.data.pdf_versioning import create_version_from_pdfs
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", required=True, help="Version name, e.g. v20")
+    ap.add_argument("--version", default=None,
+                    help="Version to fill (default: auto by counter — resume OPEN or next vN)")
     ap.add_argument("--inference-url", required=True,
                     help="Serving LB base URL, e.g. http://34.142.198.19")
     ap.add_argument("--max-samples", type=int, required=True,
@@ -70,13 +71,13 @@ def main() -> None:
     else:
         exclude = None   # → module default (BENCHMARK_VERSION env / "benchmark")
 
-    print(f"[pdf-version] {len(pdfs)} PDF → {args.inference_url} → bắt đầu từ "
-          f"'{args.version}' (N={args.max_samples}/version, dpi={args.dpi})")
+    print(f"[pdf-version] {len(pdfs)} PDF → {args.inference_url} → version "
+          f"{args.version or 'auto (counter)'} (N={args.max_samples}, dpi={args.dpi})")
     written = create_version_from_pdfs(
-        version=args.version,
         pdf_paths=pdfs,
         inference_url=args.inference_url,
         max_samples=args.max_samples,
+        version=args.version,
         dpi=args.dpi,
         max_tokens=args.max_tokens,
         model=args.model,

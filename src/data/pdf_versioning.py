@@ -176,6 +176,39 @@ def _next_free_version(existing: set[str], base: str) -> str:
     return f"{base}_{k}"
 
 
+def _pdf_versions(client, bucket: str, existing: set[str]) -> dict[str, dict]:
+    """{name: metadata} for versions created by THIS PDF pipeline (have
+    `target_per_version`) — so auto-resolve never touches HF/other versions."""
+    out = {}
+    for v in existing:
+        m = _version_meta(client, bucket, v)
+        if m and "target_per_version" in m:
+            out[v] = m
+    return out
+
+
+def _resolve_start_version(client, bucket: str, existing: set[str]) -> str:
+    """Auto-pick the version to fill, by counter:
+      - resume the latest OPEN PDF version (count < N) if one exists, else
+      - the next free vN after the highest existing v-number.
+    """
+    pdfvers = _pdf_versions(client, bucket, existing)
+
+    def _num(v: str) -> int:
+        m = re.search(r"(\d+)$", v)
+        return int(m.group(1)) if m else -1
+
+    open_vers = [v for v, m in pdfvers.items() if not m.get("complete", False)]
+    if open_vers:
+        return max(open_vers, key=_num)        # the still-fillable one
+
+    nums = [int(m.group(1)) for v in existing if (m := re.match(r"^v(\d+)$", v))]
+    nxt = (max(nums) + 1) if nums else 1
+    while f"v{nxt}" in existing:
+        nxt += 1
+    return f"v{nxt}"
+
+
 # ── MLflow lineage ─────────────────────────────────────────────────────────────
 
 def _log_to_mlflow(version: str, metadata: dict, meta_json_path: str) -> str:
@@ -244,10 +277,10 @@ def _save_version(client, bucket, version, samples, target, source_url, model, d
 # ── Pipeline: fill versions to N, append to OPEN, overflow to new ─────────────--
 
 def create_version_from_pdfs(
-    version: str,
     pdf_paths: list[str],
     inference_url: str,
     max_samples: int,
+    version: str | None = None,
     dpi: int = 200,
     max_tokens: int = 2048,
     model: str = DEFAULT_MODEL,
@@ -255,11 +288,13 @@ def create_version_from_pdfs(
     exclude_versions: list[str] | None = None,
 ) -> list[dict]:
     """
-    Ingest PDFs into fixed-size (N=max_samples) versions, starting at `version`.
+    Ingest PDFs into fixed-size (N=max_samples) versions.
 
-    - If `version` exists and is OPEN (count < N): load it, append new pages
+    - `version=None` (default): auto-pick by counter — resume the latest OPEN PDF
+      version if one exists, else the next free vN.
+    - If the chosen version is OPEN (count < N): load it, append new pages
       (deduped against existing) until it reaches N.
-    - If `version` is already COMPLETE (count >= N): start at the next free name.
+    - If it is already COMPLETE (count >= N): start at the next free name.
     - Each version closes at exactly N; overflow spills into the next free
       auto-numbered version. The last version may stay OPEN (< N) for next time.
 
@@ -278,6 +313,10 @@ def create_version_from_pdfs(
 
     if exclude_versions is None:
         exclude_versions = [os.environ.get("BENCHMARK_VERSION", "benchmark")]
+
+    if version is None:
+        version = _resolve_start_version(client, bucket, existing)
+        print(f"  [auto] version = {version} (theo counter)", flush=True)
 
     # decide the starting (open) version + preload its samples if extending
     meta0 = _version_meta(client, bucket, version)

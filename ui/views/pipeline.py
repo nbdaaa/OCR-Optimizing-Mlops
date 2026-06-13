@@ -32,9 +32,11 @@ def _api_host() -> str:
     return urlparse(st.session_state.get("api_base", "")).hostname or "localhost"
 
 
-def _run_pdf_ingest(version, uploaded, inf_url, n, dpi, exclude_bench) -> None:
+def _run_pdf_ingest(uploaded, inf_url, n, dpi) -> None:
     """Client-side: PDFs → inference server → data version(s). Runs in-process
-    (Streamlit is local), so it needs MinIO/MLflow env + pymupdf installed here."""
+    (Streamlit is local), so it needs MinIO/MLflow env + pymupdf installed here.
+    Version is auto-resolved by the pipeline counter; benchmark leakage guard is
+    always on."""
     from dotenv import load_dotenv
     load_dotenv()
     host = _api_host()
@@ -61,9 +63,9 @@ def _run_pdf_ingest(version, uploaded, inf_url, n, dpi, exclude_bench) -> None:
                         f"(tiến trình chi tiết in ở terminal chạy streamlit)"):
             try:
                 written = create_version_from_pdfs(
-                    version=version, pdf_paths=paths, inference_url=inf_url,
-                    max_samples=n, dpi=dpi,
-                    exclude_versions=None if exclude_bench else [],
+                    pdf_paths=paths, inference_url=inf_url, max_samples=n, dpi=dpi,
+                    version=None,          # auto by counter
+                    exclude_versions=None,  # always exclude benchmark
                 )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Lỗi ingest: {exc}")
@@ -131,29 +133,23 @@ if section == _DATA:
     # Self-labeling từ PDF (chạy client-side trong tiến trình Streamlit).
     # (Mode "Từ HF Hub" tạm ẩn — endpoint /data/versions/create vẫn còn nếu cần.)
     st.caption("Client tách PDF → ảnh từng trang → inference server → DocTags → gom đủ N "
-               "thành 1 version. Version chưa đủ N giữ trạng thái OPEN, lần sau upload PDF "
-               "mới (cùng version) sẽ append tiếp; đủ N thì đóng, phần dư tràn sang version "
-               "mới tự đánh số. Trang trùng benchmark bị loại tự động (chống leakage).")
+               "thành 1 version. Version tự đánh số theo counter (resume version OPEN nếu "
+               "có, không thì lấy số kế tiếp); đủ N thì đóng, phần dư tràn sang version mới. "
+               "Trang trùng benchmark luôn bị loại tự động (chống leakage).")
     with st.form("pdf_version"):
         c1, c2 = st.columns(2)
-        version = c1.text_input("Version name", placeholder="v20",
-                                help="Truyền lại đúng tên version OPEN để append tiếp.")
-        n = c2.number_input("Sample / version (N)", min_value=1, value=200, step=10)
+        n = c1.number_input("Sample / version (N)", min_value=1, value=200, step=10)
+        dpi = c2.number_input("Render DPI", min_value=72, value=200, step=10)
         inf_url = st.text_input("Inference server URL", value=f"http://{_api_host()}",
                                 help="LB serving (OpenAI-compatible). Pool phải đang Deploy.")
-        c3, c4 = st.columns(2)
-        dpi = c3.number_input("Render DPI", min_value=72, value=200, step=10)
-        exclude_bench = c4.checkbox("Loại trùng benchmark (chống leakage)", value=True)
         pdfs = st.file_uploader("PDF tài liệu", type=["pdf"], accept_multiple_files=True)
         go = st.form_submit_button("🚀 Tạo / append version từ PDF", type="primary")
 
     if go:
-        if not version:
-            st.error("Cần nhập version name.")
-        elif not pdfs:
+        if not pdfs:
             st.error("Cần upload ít nhất 1 PDF.")
         else:
-            _run_pdf_ingest(version, pdfs, inf_url.rstrip("/"), int(n), int(dpi), exclude_bench)
+            _run_pdf_ingest(pdfs, inf_url.rstrip("/"), int(n), int(dpi))
 
 # ── Training: trigger + track + live logs ─────────────────────────────────────
 elif section == _TRAIN:
