@@ -47,6 +47,7 @@ PROM_TARGETS      = os.environ.get("PROM_TARGETS_FILE", "/opt/ocr/prometheus/tar
 COLAB             = os.environ.get("COLAB_CLI", "colab")
 LOG_DIR           = os.environ.get("POOL_LOG_DIR", "/opt/ocr/logs")
 READY_GIVEUP_S    = int(os.environ.get("READY_GIVEUP_S", "600"))      # kill instance if no tunnel in time
+HEALTH_FAIL_CHECKS = int(os.environ.get("HEALTH_FAIL_CHECKS", "3"))   # consecutive /metrics fails → ready instance is dead
 
 _TUNNEL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
@@ -59,6 +60,7 @@ class Instance:
     started_at: float
     tunnel_url: str | None = None
     adapter: str | None = None      # which adapter version this instance loaded
+    health_fails: int = 0           # consecutive /metrics-unreachable polls (post-ready)
 
 
 # ── Colab session control ─────────────────────────────────────────────────────
@@ -233,20 +235,34 @@ def main() -> None:
         try:
             floor = _read_floor()
 
-            # reconcile: drop instances whose process died, or that never became
-            # ready within the giveup window
+            # reconcile: drop instances that died (startup OR post-ready), so the
+            # loop relaunches a fresh one instead of routing to a stale tunnel (530).
             for inst in list(instances):
                 _resolve_tunnel(inst)
-                dead = inst.proc.poll() is not None and not inst.tunnel_url
+                # the `colab run` subprocess exited → session/vLLM gone (any phase)
+                proc_dead = inst.proc.poll() is not None
+                # never produced a tunnel within the giveup window
                 stuck = (not inst.tunnel_url
                          and time.time() - inst.started_at > READY_GIVEUP_S)
-                if dead or stuck:
-                    print(f"[pool] {inst.name} failed to start ({'dead' if dead else 'stuck'})",
-                          flush=True)
+                # was ready, but origin stopped answering /metrics (Colab reclaim,
+                # cloudflared drop, vLLM OOM) for HEALTH_FAIL_CHECKS consecutive polls
+                unhealthy = False
+                if inst.tunnel_url and not proc_dead:
+                    if _queue(inst.tunnel_url) is None:
+                        inst.health_fails += 1
+                        unhealthy = inst.health_fails >= HEALTH_FAIL_CHECKS
+                    else:
+                        inst.health_fails = 0
+                if proc_dead or stuck or unhealthy:
+                    reason = "dead" if proc_dead else ("unhealthy" if unhealthy else "stuck")
+                    print(f"[pool] {inst.name} removed ({reason}) → relaunching", flush=True)
                     _stop(inst)
                     instances.remove(inst)
-                    fail_count += 1
-                    blocked_until = time.time() + min(30 * fail_count, 300)
+                    # Back off only on STARTUP failures (never became ready). A
+                    # healthy instance that later died should relaunch promptly.
+                    if not inst.tunnel_url:
+                        fail_count += 1
+                        blocked_until = time.time() + min(30 * fail_count, 300)
 
             # any healthy instance → reset the failure backoff
             if any(i.tunnel_url for i in instances):
