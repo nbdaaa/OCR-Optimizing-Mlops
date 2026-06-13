@@ -162,21 +162,15 @@ elif section == _TRAIN:
         (str(v["version"]) for v in models.get("versions", [])), key=int, reverse=True
     ) if ok_m else []
 
-    _MASK_LABELS = {
-        "all → text + bbox (phase 1)": "all",
-        "bbox → tinh chỉnh bounding box (phase 2)": "bbox",
-    }
+    # Mask-mode selector tạm ẩn (loc-only/bbox đang điều tra — gây overfit, không
+    # cải thiện structure). Training mặc định full-sequence "all". Khôi phục sau khi
+    # xác minh nguyên nhân (truncation/độ phân giải) bằng cách bỏ comment phần này
+    # + ô selectbox + nhánh body["mask_mode"] bên dưới.
 
     with st.form("trigger_training"):
         st.subheader("Trigger a training job")
         dv = st.selectbox("Data version", data_versions) if data_versions else st.text_input("Data version")
         init_v = st.selectbox("Warm-start from model version", ["latest (default)"] + model_versions)
-        mask_label = st.selectbox(
-            "Mask mode", list(_MASK_LABELS.keys()),
-            help="phase 2 (bbox): loss chỉ trên loc + element tags để tinh chỉnh box. "
-                 "Nên warm-start từ adapter phase 1 + learning_rate nhỏ (vd 5e-6) + ít epoch. "
-                 "Run sẽ được lưu vào experiment 'post-training' trên MLflow.",
-        )
         gpu_offer = st.text_input("GPU offer ID (để trống = env / auto-select)", placeholder="vd 39903270")
         c1, c2, c3, c4 = st.columns(4)
         epochs = c1.number_input("num_epochs", min_value=1, value=None, step=1)
@@ -189,9 +183,6 @@ elif section == _TRAIN:
         body = {"data_version": dv}
         if init_v and not init_v.startswith("latest"):
             body["init_adapter_version"] = init_v
-        mask_mode = _MASK_LABELS[mask_label]
-        if mask_mode != "all":
-            body["mask_mode"] = mask_mode
         if gpu_offer.strip():
             body["gpu_template_id"] = gpu_offer.strip()
         if epochs is not None: body["num_epochs"] = int(epochs)
