@@ -13,6 +13,8 @@ Auto behaviour (all configurable via env):
     queue high      → scale up   (up to POOL_MAX)
     idle 5 min      → scale 2->1
     idle 10 min     → auto-sleep 1->0 (also sets desired_floor=0)
+                      set AUTO_SLEEP_IDLE_S=0 to DISABLE → pool stays at floor 1
+                      until an explicit /deploy teardown.
     COOLDOWN_S between scale actions to avoid flapping.
 
 Run:  HF_TOKEN=... python -m src.serving.colab_pool_scaler
@@ -34,7 +36,7 @@ GPU               = os.environ.get("COLAB_GPU", "L4")
 POOL_MAX          = int(os.environ.get("POOL_MAX", "2"))
 SCALE_UP_QUEUE    = float(os.environ.get("SCALE_UP_QUEUE", "4"))      # avg (waiting+running)/inst
 SCALE_DOWN_IDLE_S = int(os.environ.get("SCALE_DOWN_IDLE_S", "300"))   # 2->1
-AUTO_SLEEP_IDLE_S = int(os.environ.get("AUTO_SLEEP_IDLE_S", "600"))   # 1->0
+AUTO_SLEEP_IDLE_S = int(os.environ.get("AUTO_SLEEP_IDLE_S", "600"))   # 1->0; 0 = never auto-sleep
 COOLDOWN_S        = int(os.environ.get("COOLDOWN_S", "240"))
 POLL_S            = int(os.environ.get("POLL_INTERVAL_S", "15"))
 SESSION_TIMEOUT   = os.environ.get("COLAB_SESSION_TIMEOUT", "21600")
@@ -313,7 +315,10 @@ def main() -> None:
                 last_scale = time.time()
                 print(f"[pool] SCALE DOWN → {len(instances)} (idle {int(idle)}s)", flush=True)
 
-            elif len(instances) == 1 and idle > AUTO_SLEEP_IDLE_S:
+            elif (AUTO_SLEEP_IDLE_S > 0 and len(instances) == 1
+                    and idle > AUTO_SLEEP_IDLE_S):
+                # AUTO_SLEEP_IDLE_S=0 disables this → pool stays at floor 1 until
+                # an explicit /deploy teardown (desired_floor=0).
                 _stop(instances.pop())
                 _set_floor(0)   # persist auto-sleep so it stays down until next Deploy
                 floor = 0
