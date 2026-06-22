@@ -8,3 +8,4 @@ build/
 .venv/
 venv/
 scaler_state.json
+scripts/

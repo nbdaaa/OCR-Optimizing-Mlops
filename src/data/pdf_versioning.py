@@ -30,6 +30,7 @@ import unicodedata
 from datetime import datetime, timezone
 
 import boto3
+import imagehash
 import pandas as pd
 import requests
 from PIL import Image
@@ -154,6 +155,29 @@ def _load_samples(client, bucket: str, version: str) -> list[dict]:
     return out
 
 
+def _version_hashes(client, bucket: str, version: str) -> tuple[set[str], list]:
+    """Return (md5_set, phash_list) for a version's images.
+
+    Prefers the precomputed hashes stored in metadata.json (cheap: one small
+    JSON read); falls back to loading the parquet and hashing the images for
+    versions saved before hashes were stored. The phash strings are rebuilt into
+    ImageHash objects so the Hamming-distance comparison still works."""
+    meta = _version_meta(client, bucket, version)
+    hashes = meta.get("image_hashes") if meta else None
+    if isinstance(hashes, list) and hashes:
+        md5s = {h["md5"] for h in hashes if h.get("md5")}
+        phs = [imagehash.hex_to_hash(h["phash"]) for h in hashes if h.get("phash")]
+        return md5s, phs
+    # fallback: old version without stored hashes → load images and hash them
+    md5s, phs = set(), []
+    for s in _load_samples(client, bucket, version):
+        if s["image"] is None:
+            continue
+        md5s.add(compute_image_hash(s["image"]))
+        phs.append(compute_phash(s["image"]))
+    return md5s, phs
+
+
 def _existing_versions(client, bucket: str) -> set[str]:
     try:
         resp = client.list_objects_v2(Bucket=bucket, Delimiter="/")
@@ -244,11 +268,18 @@ def _save_version(client, bucket, version, samples, target, source_url, model, d
                   pages_processed, infer_errors, rejected_benchmark, partial) -> dict:
     """Write one version (parquet + metadata) to MinIO + log MLflow. Overwrites if
     the version already existed (the extend/append case)."""
+    # Precompute per-image hashes so later runs can dedup against this version by
+    # reading metadata.json instead of reloading and re-hashing every image.
+    image_hashes = [
+        {"md5": compute_image_hash(s["image"]), "phash": str(compute_phash(s["image"]))}
+        for s in samples if s.get("image") is not None
+    ]
     metadata = {
         "version": version,
         "count": len(samples),
         "complete": not partial,                 # False → OPEN, can be appended later
         "target_per_version": target,
+        "image_hashes": image_hashes,
         "source": f"pdf-inference:{source_url}",
         "model": model,
         "dpi": dpi,
@@ -335,6 +366,25 @@ def create_version_from_pdfs(
     exact = {compute_image_hash(s["image"]) for s in accepted}
     phashes = [compute_phash(s["image"]) for s in accepted]
 
+    # Global dedup: index every image already stored in ANY prior data version, so
+    # an incoming page is accepted only if it is genuinely new across the WHOLE
+    # dataset — not just unique within the version currently being filled. The
+    # version being filled (`cur`) is already covered by `accepted`; benchmark /
+    # excluded versions are covered by the leakage guard below.
+    prior = [v for v in existing if v != cur and v not in exclude_versions]
+    n_prior = 0
+    for pv in prior:
+        try:
+            md5s, phs = _version_hashes(client, bucket, pv)
+            exact.update(md5s)
+            phashes.extend(phs)
+            n_prior += len(md5s)
+        except Exception as exc:  # noqa: BLE001 — skip unreadable/foreign versions
+            print(f"  [dedup] bỏ qua version '{pv}' khi nạp hash ({exc})", flush=True)
+    if n_prior:
+        print(f"  [dedup] nạp {n_prior} hash ảnh từ {len(prior)} version trước "
+              f"→ dữ liệu mới phải duy nhất toàn cục", flush=True)
+
     # Leakage guard: hashes of benchmark (and any excluded version) images. Kept in
     # a SEPARATE index so matches are reported as benchmark rejections, and so they
     # never get counted as accepted training samples.
@@ -343,11 +393,9 @@ def create_version_from_pdfs(
     for gv in exclude_versions:
         if not gv or _version_meta(client, bucket, gv) is None:
             continue
-        for s in _load_samples(client, bucket, gv):
-            if s["image"] is None:
-                continue
-            bench_exact.add(compute_image_hash(s["image"]))
-            bench_phashes.append(compute_phash(s["image"]))
+        md5s, phs = _version_hashes(client, bucket, gv)
+        bench_exact.update(md5s)
+        bench_phashes.extend(phs)
     if bench_exact:
         print(f"  [guard] {len(bench_exact)} benchmark hashes loaded "
               f"({exclude_versions}) → sẽ loại khỏi version train", flush=True)
@@ -399,7 +447,8 @@ def create_version_from_pdfs(
                 rejected_benchmark += 1
                 print(f"  [guard] {sample['sample_id']} trùng benchmark → loại", flush=True)
                 continue
-            # within-run / current-version dedup
+            # global dedup: reject if the page matches any prior version or any
+            # page already accepted this run (exact MD5 or near-duplicate pHash)
             if h_md5 in exact:
                 continue
             if any((ph - p) <= phash_threshold for p in phashes):
