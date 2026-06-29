@@ -42,6 +42,10 @@ from src.data.data_versioning import (
     upload_to_minio,
     write_parquet,
 )
+# OCR_LAYOUT_PROMPT makes Chandra emit layout HTML; chandra_to_docling converts
+# that HTML to DocTags. (bs4 is imported lazily inside the converter, so this
+# top-level import stays light for the hash-backfill path.)
+from src.data.chandra_converter import OCR_LAYOUT_PROMPT, chandra_to_docling
 
 PROMPT = "Convert this page to docling format."
 DEFAULT_MODEL = "chandra"
@@ -92,23 +96,30 @@ def infer_doctags(
     img: Image.Image,
     base_url: str,
     model: str = DEFAULT_MODEL,
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
     timeout: int = 300,
 ) -> str:
-    """Send one page image to the serving LB; return DocTags (special tokens kept,
-    Vietnamese tone marks NFC-fixed)."""
+    """Send one page image to the teacher (Chandra) and return DocTags.
+
+    Chandra is prompted (OCR_LAYOUT_PROMPT) to emit layout HTML — divs with
+    data-bbox (0-1000) + data-label — which we convert to DocTags via
+    chandra_to_docling. If the endpoint already returns DocTags, it's used as-is.
+    Vietnamese tone marks are NFC-fixed at the end.
+    """
     body = {
         "model": model,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": _data_uri(img)}},
-            {"type": "text", "text": PROMPT},
+            {"type": "text", "text": OCR_LAYOUT_PROMPT},
         ]}],
         "max_tokens": int(max_tokens), "temperature": 0.0,
-        "skip_special_tokens": False,   # keep <loc_>/element tags for training labels
     }
     r = requests.post(f"{base_url}/v1/chat/completions", json=body, timeout=timeout)
     r.raise_for_status()
-    return _fix_vn(r.json()["choices"][0]["message"]["content"])
+    raw = r.json()["choices"][0]["message"]["content"] or ""
+    if "data-bbox" in raw:                 # Chandra layout HTML → convert
+        raw = chandra_to_docling(raw)
+    return _fix_vn(raw)
 
 
 def _image_bytes(img: Image.Image) -> bytes:
@@ -324,7 +335,7 @@ def create_version_from_pdfs(
     max_samples: int,
     version: str | None = None,
     dpi: int = 200,
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
     model: str = DEFAULT_MODEL,
     phash_threshold: int = PHASH_THRESHOLD,
     exclude_versions: list[str] | None = None,
