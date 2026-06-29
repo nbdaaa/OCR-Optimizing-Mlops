@@ -49,7 +49,7 @@ from src.data.chandra_converter import OCR_LAYOUT_PROMPT, chandra_to_docling
 
 PROMPT = "Convert this page to docling format."
 DEFAULT_MODEL = "chandra"
-PHASH_THRESHOLD = 8   # hamming distance for near-duplicate images (matches phash_dedup)
+PHASH_THRESHOLD = 4   # hamming distance for near-duplicate images (matches phash_dedup)
 
 
 # This model emits Vietnamese tone marks as SPACING chars (´ ` ˜ ˇ) instead of
