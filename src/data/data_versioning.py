@@ -14,13 +14,16 @@ from typing import Any
 
 import boto3
 import imagehash
-import mlflow
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datasets import load_dataset
 from PIL import Image
 from tqdm import tqdm
+
+# NOTE: `mlflow` and `datasets` are imported lazily inside the functions that use
+# them (log_to_mlflow / the HF ingest), so lightweight consumers — e.g. the
+# hash-backfill script that only needs compute_image_hash/compute_phash — can
+# import this module without those heavy training-side dependencies installed.
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -316,6 +319,8 @@ def log_to_mlflow(version: str, metadata: dict, local_metadata_json: str) -> str
 
     Returns the MLflow run_id.
     """
+    import mlflow  # lazy: only needed when actually logging a run
+
     # MLflow's internal boto3 reads AWS_* vars for MinIO access
     os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("MINIO_ACCESS_KEY", ""))
     os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", ""))
@@ -379,6 +384,7 @@ def create_version(
         total  = len(samples)
     else:
         # Auto path: load from HF and calculate offset from existing versions.
+        from datasets import load_dataset  # lazy: only the HF ingest needs it
         offset      = get_next_offset(bucket)
         all_samples = list(load_dataset(hf_repo, split="train", streaming=False))
         samples     = all_samples[offset:]
