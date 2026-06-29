@@ -276,13 +276,19 @@ def _log_to_mlflow(version: str, metadata: dict, meta_json_path: str) -> str:
             **metadata["filter_stats"],
         })
         mlflow.log_artifact(meta_json_path, artifact_path=version)
-        mlflow.log_input(
-            mlflow.data.from_pandas(
-                pd.DataFrame([{"version": version, "count": metadata["count"]}]),
-                source=metadata["source"],
-            ),
-            context="data_versioning",
-        )
+        # log_input is best-effort lineage: pass `name` (not `source`) so MLflow
+        # doesn't try to resolve "pdf-inference:http://…" as a dataset-source URI
+        # (which raises). The source URL is already captured in params above.
+        try:
+            mlflow.log_input(
+                mlflow.data.from_pandas(
+                    pd.DataFrame([{"version": version, "count": metadata["count"]}]),
+                    name=f"data-{version}",
+                ),
+                context="data_versioning",
+            )
+        except Exception as exc:  # noqa: BLE001 — never let lineage block the save
+            print(f"  [mlflow] bỏ qua log_input ({exc})", flush=True)
     return run.info.run_id
 
 
