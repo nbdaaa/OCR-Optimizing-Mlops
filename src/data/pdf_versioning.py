@@ -455,6 +455,10 @@ def create_version_from_pdfs(
                 "img_h": h,
             }
             if not is_valid(sample):
+                snippet = (sample["output_text"] or "").strip().replace("\n", " ")[:80]
+                print(f"  [invalid] {sample['sample_id']}: output không phải DocTags "
+                      f"(thiếu <doctag>/<loc_>) → bỏ. Teacher có emit DocTags không? "
+                      f"| đầu output: {snippet!r}", flush=True)
                 continue
             h_md5 = compute_image_hash(sample["image"])
             ph = compute_phash(sample["image"])
@@ -466,8 +470,11 @@ def create_version_from_pdfs(
             # global dedup: reject if the page matches any prior version or any
             # page already accepted this run (exact MD5 or near-duplicate pHash)
             if h_md5 in exact:
+                print(f"  [dup] {sample['sample_id']}: trùng tuyệt đối ảnh đã có → bỏ", flush=True)
                 continue
             if any((ph - p) <= phash_threshold for p in phashes):
+                print(f"  [dup~] {sample['sample_id']}: gần trùng (pHash ≤ {phash_threshold}) "
+                      f"ảnh đã có → bỏ", flush=True)
                 continue
 
             accepted.append(sample)
