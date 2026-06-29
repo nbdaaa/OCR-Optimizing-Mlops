@@ -44,7 +44,7 @@ from src.data.data_versioning import (
 )
 
 PROMPT = "Convert this page to docling format."
-DEFAULT_MODEL = "ocr-adapter"
+DEFAULT_MODEL = "chandra"
 PHASH_THRESHOLD = 8   # hamming distance for near-duplicate images (matches phash_dedup)
 
 
@@ -179,11 +179,22 @@ def _version_hashes(client, bucket: str, version: str) -> tuple[set[str], list]:
 
 
 def _existing_versions(client, bucket: str) -> set[str]:
+    """Top-level version folders in the bucket (e.g. {v1, …, v18, benchmark}).
+
+    Only a genuinely missing bucket counts as "fresh" (→ start at v1). Connection,
+    endpoint, or auth failures are raised loudly: silently returning an empty set
+    here makes the counter restart at v1 and risks overwriting the real v1."""
     try:
         resp = client.list_objects_v2(Bucket=bucket, Delimiter="/")
-        return {p["Prefix"].rstrip("/") for p in resp.get("CommonPrefixes", [])}
-    except Exception:  # noqa: BLE001
+    except client.exceptions.NoSuchBucket:
         return set()
+    except Exception as exc:  # noqa: BLE001 — surface stale-endpoint / auth issues
+        raise RuntimeError(
+            f"Không liệt kê được version trong MinIO bucket '{bucket}' tại "
+            f"{os.environ.get('MINIO_ENDPOINT')!r}: {exc}. "
+            f"Kiểm tra MINIO_ENDPOINT (IP VM có thể đã đổi) / credentials."
+        ) from exc
+    return {p["Prefix"].rstrip("/") for p in resp.get("CommonPrefixes", [])}
 
 
 def _next_free_version(existing: set[str], base: str) -> str:
@@ -372,15 +383,19 @@ def create_version_from_pdfs(
     # version being filled (`cur`) is already covered by `accepted`; benchmark /
     # excluded versions are covered by the leakage guard below.
     prior = [v for v in existing if v != cur and v not in exclude_versions]
+    if prior:
+        print(f"  [dedup] nạp hash ảnh từ {len(prior)} version trước để chống trùng "
+              f"toàn cục (có thể lâu nếu version cũ chưa lưu sẵn hash)…", flush=True)
     n_prior = 0
-    for pv in prior:
+    for i, pv in enumerate(prior, 1):
         try:
             md5s, phs = _version_hashes(client, bucket, pv)
             exact.update(md5s)
             phashes.extend(phs)
             n_prior += len(md5s)
+            print(f"    [dedup {i}/{len(prior)}] '{pv}': +{len(md5s)} hash", flush=True)
         except Exception as exc:  # noqa: BLE001 — skip unreadable/foreign versions
-            print(f"  [dedup] bỏ qua version '{pv}' khi nạp hash ({exc})", flush=True)
+            print(f"    [dedup {i}/{len(prior)}] bỏ qua '{pv}' ({exc})", flush=True)
     if n_prior:
         print(f"  [dedup] nạp {n_prior} hash ảnh từ {len(prior)} version trước "
               f"→ dữ liệu mới phải duy nhất toàn cục", flush=True)
@@ -422,6 +437,7 @@ def create_version_from_pdfs(
         name = os.path.splitext(os.path.basename(pdf_path))[0]
         for page_idx, img in pdf_to_images(pdf_path, dpi=dpi):
             pages_processed += 1
+            print(f"  [infer {pages_processed}] {name} p{page_idx} → teacher…", flush=True)
             try:
                 doctags = infer_doctags(img, base_url, model=model, max_tokens=max_tokens)
             except Exception as exc:  # noqa: BLE001 — skip page, keep going

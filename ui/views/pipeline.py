@@ -40,8 +40,16 @@ def _run_pdf_ingest(uploaded, inf_url, n, dpi) -> None:
     from dotenv import load_dotenv
     load_dotenv()
     host = _api_host()
-    os.environ.setdefault("MINIO_ENDPOINT", f"http://{host}:9000")
-    os.environ.setdefault("MLFLOW_TRACKING_URI", f"http://{host}:5000")
+    # The VM IP is dynamic and the user updates it via the API base in the UI. When
+    # it points at a remote host, derive MinIO/MLflow from it and OVERRIDE any stale
+    # value loaded from .env — otherwise the version counter reads a dead endpoint,
+    # gets an empty bucket listing, and wrongly restarts at v1.
+    if host and host != "localhost":
+        os.environ["MINIO_ENDPOINT"] = f"http://{host}:9000"
+        os.environ["MLFLOW_TRACKING_URI"] = f"http://{host}:5000"
+    else:
+        os.environ.setdefault("MINIO_ENDPOINT", f"http://{host}:9000")
+        os.environ.setdefault("MLFLOW_TRACKING_URI", f"http://{host}:5000")
     missing = [k for k in ("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY") if not os.environ.get(k)]
     if missing:
         st.error(f"Thiếu trong .env: {', '.join(missing)} — cần để ghi MinIO.")
@@ -138,7 +146,7 @@ if section == _DATA:
                "Trang trùng benchmark luôn bị loại tự động (chống leakage).")
     with st.form("pdf_version"):
         c1, c2 = st.columns(2)
-        n = c1.number_input("Sample / version (N)", min_value=1, value=200, step=10)
+        n = c1.number_input("Sample / version (N)", min_value=1, value=2000, step=10)
         dpi = c2.number_input("Render DPI", min_value=72, value=200, step=10)
         inf_url = st.text_input("Inference server URL", value=f"http://{_api_host()}",
                                 help="LB serving (OpenAI-compatible). Pool phải đang Deploy.")

@@ -8,4 +8,4 @@ build/
 .venv/
 venv/
 scaler_state.json
-scripts/
+scripts/merge_and_export_gguf.ipynb
